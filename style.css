@@ -254,62 +254,64 @@ body::before {
 }
 
 /* ============================================
-   자막 영역
+   힌트 영역 (자막 자리 대체 — 상태/안내)
    ============================================ */
 
-.subtitles {
+.panel-hint {
   flex: 1;
-  margin-top: 24px;
+  margin-top: 20px;
   display: flex;
   flex-direction: column;
+  align-items: center;
   justify-content: center;
-  gap: 14px;
-  overflow: hidden;
-  min-height: 0;
+  gap: 18px;
+  text-align: center;
+  padding: 0 8px;
+  transition: opacity 0.4s var(--ease), transform 0.4s var(--ease);
 }
 
-.subtitle {
-  margin: 0;
-  word-break: break-word;
-  white-space: pre-wrap;
-  transition: opacity 0.3s var(--ease-out);
+.hint-icon {
+  font-size: clamp(44px, 12vw, 64px);
+  line-height: 1;
+  opacity: 0.55;
+  filter: grayscale(0.2);
+  transition: opacity 0.3s var(--ease), transform 0.6s var(--ease);
 }
 
-.subtitle:empty::before {
-  content: attr(data-placeholder);
-  color: var(--text-soft);
-  font-weight: 600;
-  font-size: clamp(16px, 4.2vw, 19px);
-  letter-spacing: -0.005em;
-  opacity: 0.85;
-}
-.subtitle[data-spent="1"]:empty::before {
-  opacity: 0.5;
-}
-
-/* 원문 — 작고 흐리게 */
-.subtitle--src {
-  font-size: clamp(13px, 3.5vw, 15px);
-  color: var(--text-dim);
-  font-weight: 500;
-  letter-spacing: 0.002em;
-  line-height: 1.5;
-  min-height: 1.5em;
-}
-
-/* 번역문 — 메인 영역, 크고 또렷하게 */
-.subtitle--dst {
+.hint-text {
   font-family: var(--font-display);
-  font-size: clamp(24px, 7vw, 36px);
-  font-weight: 700;
-  letter-spacing: -0.022em;
-  line-height: 1.2;
-  color: var(--text);
-  min-height: 1.2em;
+  font-size: clamp(17px, 4.5vw, 21px);
+  font-weight: 600;
+  color: var(--text-soft);
+  letter-spacing: -0.01em;
+  line-height: 1.35;
+  max-width: 280px;
 }
 
-.panel--top .subtitle--src { order: 2; }
-.panel--top .subtitle--dst { order: 1; }
+/* 활성 패널의 힌트: 강조 */
+.panel.is-active .hint-icon {
+  opacity: 1;
+  animation: hint-bob 1.6s var(--ease) infinite;
+}
+.panel.is-active .hint-text {
+  color: var(--text);
+}
+
+/* 통역 중(음성 출력 중)인 패널의 힌트 */
+.panel.is-speaking .hint-icon {
+  opacity: 1;
+  animation: hint-wave 1.2s var(--ease) infinite;
+}
+
+@keyframes hint-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
+@keyframes hint-wave {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
 
 /* ============================================
    컨트롤 바

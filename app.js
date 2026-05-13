@@ -47,13 +47,18 @@ const els = {
   partnerName: document.getElementById('partnerName'),
   panelMe: document.getElementById('panelMe'),
   panelPartner: document.getElementById('panelPartner'),
-  meSrc: document.getElementById('meSrc'),
-  meDst: document.getElementById('meDst'),
-  partnerSrc: document.getElementById('partnerSrc'),
-  partnerDst: document.getElementById('partnerDst'),
+  meHint: document.getElementById('meHint'),
+  partnerHint: document.getElementById('partnerHint'),
   audioMeToPartner: document.getElementById('audioMeToPartner'),
   audioPartnerToMe: document.getElementById('audioPartnerToMe'),
 };
+
+function setHint(side, icon, text) {
+  const el = side === 'me' ? els.meHint : els.partnerHint;
+  if (!el) return;
+  el.querySelector('.hint-icon').textContent = icon;
+  el.querySelector('.hint-text').textContent = text;
+}
 
 // 세션 객체 두 개를 보관
 const sessions = {
@@ -305,8 +310,9 @@ async function fetchClientSecret(targetLanguage) {
 /**
  * 단일 통역 세션(한 방향) 생성
  * outboundTrack은 audioPipeline.outboundTrack (마이크→게이트 후 합성된 트랙)
+ * onSpeakingStart/End: 통역 음성 출력 시작/종료 신호 (UI 큐용)
  */
-async function openSession({ targetLanguage, outboundTrack, audioOut, onSrc, onDst }) {
+async function openSession({ targetLanguage, outboundTrack, audioOut, onSpeakingStart, onSpeakingEnd }) {
   const clientSecret = await fetchClientSecret(targetLanguage);
 
   const pc = new RTCPeerConnection();
@@ -317,6 +323,7 @@ async function openSession({ targetLanguage, outboundTrack, audioOut, onSrc, onD
     lastDeltaAt: 0,            // 마지막으로 자막/오디오 델타가 도착한 시각 (ms)
     outputCompletedAt: 0,      // output_transcript.completed 받은 시각
     completed: false,          // 마지막 발화에 대한 결과를 모두 받았는지
+    speaking: false,           // 통역 음성 출력 중인지
   };
   const markActivity = () => {
     state.lastDeltaAt = Date.now();
@@ -336,25 +343,31 @@ async function openSession({ targetLanguage, outboundTrack, audioOut, onSrc, onD
   // 트랙 자체는 enabled를 토글하지 않는다 (RMS 측정/게이팅이 항상 가능해야 하므로).
   const sender = pc.addTrack(outboundTrack);
 
+  // 통역 음성 출력 중인지 트래킹 (UI 큐용)
+  let speakingTimer = null;
+  const markSpeakingTick = () => {
+    if (!state.speaking) {
+      state.speaking = true;
+      onSpeakingStart?.();
+    }
+    if (speakingTimer) clearTimeout(speakingTimer);
+    speakingTimer = setTimeout(() => {
+      state.speaking = false;
+      onSpeakingEnd?.();
+    }, 600);
+  };
+
   events.addEventListener('message', (e) => {
     let evt;
     try { evt = JSON.parse(e.data); } catch { return; }
-    if (evt.type === 'session.input_transcript.delta' && evt.delta) {
-      onSrc(evt.delta);
-      markActivity();
-    }
-    if (evt.type === 'session.output_transcript.delta' && evt.delta) {
-      onDst(evt.delta);
-      markActivity();
-    }
     if (evt.type === 'session.output_audio.delta') {
       markActivity();
-      // ducking은 사용하지 않음 — 동시통역을 위해.
-      // 사용자가 말을 멈추면 VAD가 자동으로 마이크를 게이팅해서 피드백을 막는다.
+      markSpeakingTick();
     }
-    if (evt.type === 'session.input_transcript.completed') onSrc('\n');
+    if (evt.type === 'session.output_transcript.delta') {
+      markActivity();
+    }
     if (evt.type === 'session.output_transcript.completed') {
-      onDst('\n');
       state.outputCompletedAt = Date.now();
       state.completed = true;
     }
@@ -443,15 +456,17 @@ async function initSessions() {
       targetLanguage: partnerLang,
       outboundTrack: pipeline.outboundTrack,
       audioOut: els.audioMeToPartner,
-      onSrc: (d) => appendSubtitle(els.meSrc, d),
-      onDst: (d) => appendSubtitle(els.partnerDst, d),
+      // 내가 말함 → 상대 패널에 통역 음성이 흘러나옴
+      onSpeakingStart: () => onSpeaking('partner', true),
+      onSpeakingEnd: () => onSpeaking('partner', false),
     }),
     openSession({
       targetLanguage: myLang,
       outboundTrack: pipeline.outboundTrack,
       audioOut: els.audioPartnerToMe,
-      onSrc: (d) => appendSubtitle(els.partnerSrc, d),
-      onDst: (d) => appendSubtitle(els.meDst, d),
+      // 상대가 말함 → 내 패널에 통역 음성이 흘러나옴
+      onSpeakingStart: () => onSpeaking('me', true),
+      onSpeakingEnd: () => onSpeaking('me', false),
     }),
   ]);
 
@@ -468,98 +483,33 @@ async function initSessions() {
 }
 
 /* ============================================
-   자막 관리: 발화 단위 + 페이드 아웃
-   ============================================ */
+   힌트 영역 상태 큐 관리
+   ============================================
+   - 어느 패널이 활성(PTT 눌림)인지
+   - 어느 패널에서 통역 음성이 나오는 중인지
+   에 따라 .is-active / .is-speaking 클래스를 토글하고 안내 텍스트를 갱신한다.
+*/
 
-const MAX_CHARS = 240;        // 한 발화 내 글자 수 상한 (넘으면 앞쪽 잘림)
-const FADE_DELAY_MS = 3500;   // 발화 완료 후 페이드 아웃까지 대기
-const FADE_DURATION_MS = 600; // 페이드 아웃 자체 시간
-
-// 각 자막 element별 상태: { fadeTimer, removeTimer, isFading }
-const subtitleState = new WeakMap();
-
-function getSubState(el) {
-  let s = subtitleState.get(el);
-  if (!s) {
-    s = { fadeTimer: null, removeTimer: null, isFading: false };
-    subtitleState.set(el, s);
-  }
-  return s;
+function defaultHints() {
+  setHint('me', '🎙️', '파란색 버튼을 누르고 말하세요');
+  setHint('partner', '🎙️', '보라색 버튼을 누르고 말하세요');
 }
 
-function cancelFade(el) {
-  const s = getSubState(el);
-  if (s.fadeTimer) { clearTimeout(s.fadeTimer); s.fadeTimer = null; }
-  if (s.removeTimer) { clearTimeout(s.removeTimer); s.removeTimer = null; }
-  if (s.isFading) {
-    el.style.transition = '';
-    el.style.opacity = '';
-    s.isFading = false;
+function onSpeaking(side, isStart) {
+  const panel = side === 'me' ? els.panelMe : els.panelPartner;
+  if (isStart) {
+    panel.classList.add('is-speaking');
+    setHint(side, '🔊', '통역 중…');
+  } else {
+    panel.classList.remove('is-speaking');
+    // 활성 상태가 아니면 기본 안내로 복귀
+    if (!panel.classList.contains('is-active')) {
+      const text = side === 'me'
+        ? '파란색 버튼을 누르고 말하세요'
+        : '보라색 버튼을 누르고 말하세요';
+      setHint(side, '🎙️', text);
+    }
   }
-}
-
-function appendSubtitle(el, delta) {
-  // 새 델타가 들어옴 = 발화 진행 중. 페이드 예약을 취소.
-  cancelFade(el);
-
-  // 페이드 아웃이 끝나 비어있는 상태였다면 깨끗하게 시작
-  if (el.dataset.spent === '1') {
-    el.textContent = '';
-    el.dataset.spent = '';
-  }
-
-  el.textContent += delta;
-
-  // 너무 길어지면 앞쪽 잘라내기 (한 발화 내 누적 방지)
-  if (el.textContent.length > MAX_CHARS) {
-    el.textContent = '…' + el.textContent.slice(-MAX_CHARS);
-  }
-}
-
-/**
- * 발화 완료 신호. 일정 시간 후 자막을 페이드 아웃해서 비움.
- */
-function scheduleFadeOut(el) {
-  if (!el.textContent) return;
-  cancelFade(el);
-  const s = getSubState(el);
-
-  s.fadeTimer = setTimeout(() => {
-    s.fadeTimer = null;
-    s.isFading = true;
-    el.style.transition = `opacity ${FADE_DURATION_MS}ms ease-out`;
-    el.style.opacity = '0';
-
-    s.removeTimer = setTimeout(() => {
-      s.removeTimer = null;
-      s.isFading = false;
-      el.textContent = '';
-      el.dataset.spent = '1';
-      el.style.transition = '';
-      el.style.opacity = '';
-    }, FADE_DURATION_MS);
-  }, FADE_DELAY_MS);
-}
-
-function clearSubtitlesFor(direction) {
-  const targets = direction === 'meToPartner'
-    ? [els.meSrc, els.partnerDst]
-    : [els.partnerSrc, els.meDst];
-  for (const el of targets) {
-    cancelFade(el);
-    el.textContent = '';
-    el.dataset.spent = '';
-  }
-}
-
-/**
- * 한 방향의 자막 두 줄(원문/번역)에 동시에 페이드 아웃 예약
- */
-function scheduleFadeOutForDirection(direction) {
-  const targets = direction === 'meToPartner'
-    ? [els.meSrc, els.partnerDst]
-    : [els.partnerSrc, els.meDst];
-  for (const el of targets) scheduleFadeOut(el);
 }
 
 /**
@@ -579,25 +529,20 @@ function startTalk(direction) {
   active.sender.replaceTrack(active.outboundTrack);
   inactive.sender.replaceTrack(null);
 
-  // VAD 시작 — 게이트(GainNode) 1로 두고 RMS 모니터링 시작
   startVAD();
-
-  // 새 발화 시작 → 이전 자막 정리 (양방향 모두)
-  // 페이드 아웃 진행 중이던 것도 즉시 제거되어 화면이 깨끗해진다.
-  clearSubtitlesFor('meToPartner');
-  clearSubtitlesFor('partnerToMe');
 
   const btn = direction === 'meToPartner' ? els.pttMe : els.pttPartner;
   btn.classList.add('is-active');
-  // 활성 방향에 따라 해당 패널도 강조
   if (direction === 'meToPartner') {
     els.panelMe.classList.add('is-active');
     els.panelPartner.classList.remove('is-active');
+    setHint('me', '🎙️', '말씀하세요');
   } else {
     els.panelPartner.classList.add('is-active');
     els.panelMe.classList.remove('is-active');
+    setHint('partner', '🎙️', '말씀하세요');
   }
-  setStatus(direction === 'meToPartner' ? '듣는 중' : '듣는 중', 'listening');
+  setStatus('듣는 중', 'listening');
   haptic(15);
 }
 
@@ -632,6 +577,14 @@ function stopTalk() {
   els.pttMe.disabled = true;
   els.pttPartner.disabled = true;
   setStatus('마무리 중', 'ok');
+  // 통역 중 표시(.is-speaking)는 그대로 두고, 출력이 끝날 때 onSpeakingEnd가 정리.
+  // 입력 쪽 힌트(말씀하세요)는 즉시 기본으로 복귀
+  if (direction === 'meToPartner' && !els.panelMe.classList.contains('is-speaking')) {
+    setHint('me', '🎙️', '파란색 버튼을 누르고 말하세요');
+  }
+  if (direction === 'partnerToMe' && !els.panelPartner.classList.contains('is-speaking')) {
+    setHint('partner', '🎙️', '보라색 버튼을 누르고 말하세요');
+  }
   haptic(8);
 
   if (!active) {
@@ -660,8 +613,6 @@ function stopTalk() {
     if (shouldStop) {
       clearInterval(timer);
       try { active.sender.replaceTrack(null); } catch {}
-      // 발화 끝났으니 잠시 후 자막 자동 정리
-      scheduleFadeOutForDirection(direction);
       finishGrace();
     }
   }, 100);
@@ -711,6 +662,7 @@ async function reinitOnLangChange() {
 
 function init() {
   updateLangBadges();
+  defaultHints();
   els.myLang.addEventListener('change', () => {
     updateLangBadges();
     reinitOnLangChange();

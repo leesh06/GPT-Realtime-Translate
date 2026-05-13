@@ -47,9 +47,7 @@ export default async function handler(req, res) {
         session: {
           model: MODEL,
           audio: {
-            input: {
-              transcription: { model: 'gpt-realtime-whisper' },
-            },
+            // 입력 받아쓰기(whisper) 비활성 — 텍스트 자막을 안 쓰므로 비용 절감
             output: { language: targetLanguage },
           },
         },
