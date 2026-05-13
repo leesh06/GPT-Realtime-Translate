@@ -67,6 +67,52 @@ function haptic(ms = 12) {
   }
 }
 
+/**
+ * 모바일에서 WebRTC 오디오를 라우드스피커(미디어 출력)로 강제 라우팅.
+ *
+ * 1) MediaStream을 audio.srcObject에 한 번 붙임 (iOS는 이게 있어야 트랙이 살아남음)
+ *    단 audio.muted = true로 두어 이중 재생 방지.
+ * 2) AudioContext로 같은 스트림을 받아서 GainNode 거쳐 destination으로 출력.
+ *    이 경로는 일반 미디어 재생 경로라 라우드스피커로 나가고 미디어 볼륨을 따른다.
+ */
+let sharedAudioContext = null;
+function getAudioContext() {
+  if (!sharedAudioContext) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    sharedAudioContext = new Ctx({ latencyHint: 'interactive' });
+  }
+  return sharedAudioContext;
+}
+
+function routeToLoudspeaker(stream, sinkEl) {
+  // (1) iOS 안전장치: srcObject 연결 + 음소거. 트랙이 죽지 않도록.
+  try {
+    sinkEl.srcObject = stream;
+    sinkEl.muted = true;
+    sinkEl.playsInline = true;
+    sinkEl.setAttribute('playsinline', '');
+    // play()는 사용자 제스처 후에만 성공. 실패해도 무시 (muted라 영향 없음).
+    sinkEl.play?.().catch(() => {});
+  } catch {}
+
+  // (2) AudioContext 경로로 실제 재생 (라우드스피커, 미디어 볼륨)
+  try {
+    const ctx = getAudioContext();
+    const src = ctx.createMediaStreamSource(stream);
+    const gain = ctx.createGain();
+    gain.gain.value = 1.6; // 살짝 부스트 — 모바일에서 통역 음성이 작은 경향
+    src.connect(gain).connect(ctx.destination);
+    // resume은 첫 사용자 제스처 후에만 가능 → bootstrap에서 한 번 해줌
+  } catch (err) {
+    console.warn('AudioContext routing 실패, srcObject 폴백:', err);
+    // 폴백: 일반 재생
+    try {
+      sinkEl.muted = false;
+      sinkEl.play?.().catch(() => {});
+    } catch {}
+  }
+}
+
 function updateLangBadges() {
   const my = els.myLang.value;
   const partner = els.partnerLang.value;
@@ -108,11 +154,24 @@ async function openSession({ targetLanguage, micTrack, audioOut, onSrc, onDst })
   const pc = new RTCPeerConnection();
   const events = pc.createDataChannel('oai-events');
 
-  // 번역된 오디오 수신
+  // 세션 상태 (트레일링 그레이스 판단용)
+  const state = {
+    lastDeltaAt: 0,            // 마지막으로 자막/오디오 델타가 도착한 시각 (ms)
+    outputCompletedAt: 0,      // output_transcript.completed 받은 시각
+    completed: false,          // 마지막 발화에 대한 결과를 모두 받았는지
+  };
+  const markActivity = () => {
+    state.lastDeltaAt = Date.now();
+    state.completed = false;
+  };
+
+  // 번역된 오디오 수신.
+  // 모바일에서 WebRTC 오디오를 audio.srcObject로 바로 재생하면 브라우저가
+  // "음성통화 모드"로 라우팅 → 이어피스로 작게 나옴.
+  // 해결: AudioContext를 거쳐 미디어 스트림으로 재생 → 미디어 볼륨/라우드스피커로 출력.
   pc.ontrack = ({ streams }) => {
-    if (streams && streams[0]) {
-      audioOut.srcObject = streams[0];
-    }
+    if (!streams || !streams[0]) return;
+    routeToLoudspeaker(streams[0], audioOut);
   };
 
   // 마이크 트랙 추가. 시작은 비활성 상태.
@@ -122,10 +181,23 @@ async function openSession({ targetLanguage, micTrack, audioOut, onSrc, onDst })
   events.addEventListener('message', (e) => {
     let evt;
     try { evt = JSON.parse(e.data); } catch { return; }
-    if (evt.type === 'session.input_transcript.delta' && evt.delta) onSrc(evt.delta);
-    if (evt.type === 'session.output_transcript.delta' && evt.delta) onDst(evt.delta);
+    if (evt.type === 'session.input_transcript.delta' && evt.delta) {
+      onSrc(evt.delta);
+      markActivity();
+    }
+    if (evt.type === 'session.output_transcript.delta' && evt.delta) {
+      onDst(evt.delta);
+      markActivity();
+    }
+    if (evt.type === 'session.output_audio.delta') {
+      markActivity();
+    }
     if (evt.type === 'session.input_transcript.completed') onSrc('\n');
-    if (evt.type === 'session.output_transcript.completed') onDst('\n');
+    if (evt.type === 'session.output_transcript.completed') {
+      onDst('\n');
+      state.outputCompletedAt = Date.now();
+      state.completed = true;
+    }
     if (evt.type === 'error') console.warn('[OpenAI error]', evt);
   });
 
@@ -152,7 +224,7 @@ async function openSession({ targetLanguage, micTrack, audioOut, onSrc, onDst })
 
   await waitForConnected(pc);
 
-  return { pc, sender, micTrack, dataChannel: events };
+  return { pc, sender, micTrack, dataChannel: events, state };
 }
 
 function waitForConnected(pc, timeoutMs = 10000) {
@@ -173,9 +245,12 @@ function waitForConnected(pc, timeoutMs = 10000) {
 
 async function ensureMic() {
   if (micStream) return micStream;
+  // 중요: echoCancellation을 true로 두면 모바일 브라우저가 출력을 통화모드(이어피스)로
+  // 강제 라우팅하는 경향이 있다. PTT 방식에서는 말하는 동안 상대 음성이 안 나오므로
+  // 에코 캔슬이 거의 불필요 → false로 둬서 라우드스피커 유지.
   micStream = await navigator.mediaDevices.getUserMedia({
     audio: {
-      echoCancellation: true,
+      echoCancellation: false,
       noiseSuppression: true,
       autoGainControl: true,
     },
@@ -284,23 +359,72 @@ function startTalk(direction) {
   haptic(15);
 }
 
+/**
+ * 손을 떼면:
+ * 1. 마이크 입력은 즉시 음소거 (더 이상 새로운 말은 안 보냄)
+ * 2. 하지만 트랙 연결과 데이터 채널은 잠시 유지 → OpenAI의 마지막 통역 결과 수신
+ * 3. 자막이 흘러나오는 중이면 자동으로 더 기다림 (최대 GRACE_MAX_MS)
+ * 4. 통역 결과가 완료되거나 일정 시간 활동이 없으면 트랙 해제
+ */
+const GRACE_MIN_MS = 1200;   // 손 뗀 후 최소 대기
+const GRACE_MAX_MS = 6000;   // 손 뗀 후 최대 대기 (안전장치)
+const GRACE_IDLE_MS = 800;   // 마지막 델타 이후 이만큼 조용하면 끝낸 걸로 간주
+
 function stopTalk() {
   if (!activeDirection) return;
 
-  const active = sessions[activeDirection];
-  if (active) {
-    active.sender.replaceTrack(null);
-  }
+  const direction = activeDirection;
+  const active = sessions[direction];
+  activeDirection = null;
 
+  // 1) 마이크는 즉시 음소거 (새 음성 차단, 피드백 방지)
   if (micStream) {
     micStream.getAudioTracks().forEach((t) => (t.enabled = false));
   }
 
+  // 2) UI는 곧바로 "통역 마무리 중" 상태로
   els.pttMe.classList.remove('is-active');
   els.pttPartner.classList.remove('is-active');
-  setStatus('준비됨', 'ok');
+  els.pttMe.disabled = true;
+  els.pttPartner.disabled = true;
+  setStatus('통역 마무리 중…', 'ok');
   haptic(8);
-  activeDirection = null;
+
+  if (!active) {
+    finishGrace();
+    return;
+  }
+
+  // 3) 트레일링 그레이스: 자막/오디오가 들어오는 동안 트랙 유지
+  const releasedAt = Date.now();
+  // 손 뗀 시각을 기준으로 활동 카운터를 새로 시작
+  active.state.lastDeltaAt = Math.max(active.state.lastDeltaAt, releasedAt);
+
+  const timer = setInterval(() => {
+    const now = Date.now();
+    const elapsed = now - releasedAt;
+    const idle = now - active.state.lastDeltaAt;
+
+    const shouldStop =
+      // 최대 시간 초과 (안전장치)
+      elapsed >= GRACE_MAX_MS ||
+      // output_transcript.completed 받았고 최소 시간 지났으면 끝
+      (active.state.completed && elapsed >= GRACE_MIN_MS) ||
+      // 최소 대기 지났고, 마지막 델타 이후 충분히 조용하면 끝
+      (elapsed >= GRACE_MIN_MS && idle >= GRACE_IDLE_MS);
+
+    if (shouldStop) {
+      clearInterval(timer);
+      try { active.sender.replaceTrack(null); } catch {}
+      finishGrace();
+    }
+  }, 100);
+}
+
+function finishGrace() {
+  els.pttMe.disabled = false;
+  els.pttPartner.disabled = false;
+  setStatus('준비됨', 'ok');
 }
 
 // PTT 이벤트 바인딩 (마우스 + 터치 + 키보드)
@@ -359,6 +483,11 @@ function init() {
   const bootstrap = async () => {
     document.removeEventListener('click', bootstrap);
     document.removeEventListener('touchstart', bootstrap);
+    // 사용자 제스처 안에서 AudioContext 초기화/resume — 라우드스피커 출력 활성화
+    try {
+      const ctx = getAudioContext();
+      if (ctx.state === 'suspended') await ctx.resume();
+    } catch {}
     try {
       await initSessions();
     } catch (err) {
