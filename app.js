@@ -82,17 +82,20 @@ let activeDirection = null; // 'meToPartner' | 'partnerToMe' | null
    PeerConnection에는 합성된 outboundTrack을 추가한다.
 */
 let audioPipeline = {
-  ctx: null,           // 분석/게이팅용 AudioContext (출력과 분리)
-  source: null,        // 마이크 MediaStreamSource
-  analyser: null,      // RMS 측정용
-  gate: null,          // 송신 게이트 (GainNode)
-  destination: null,   // MediaStreamDestination
-  outboundTrack: null, // 두 세션이 공유할 송신 트랙
+  ctx: null,
+  source: null,
+  analyser: null,
+  gate: null,
+  // 두 PC가 같은 MediaStreamTrack 인스턴스를 공유하면 일부 모바일 WebRTC 구현에서
+  // 두 번째 PC가 RTP를 보내지 못하는 케이스가 있다.
+  // → 게이트(GainNode) 출력에 MediaStreamDestination을 둘 두고 각 PC에 별도 트랙을 준다.
+  destA: null, trackA: null,   // 첫 번째 세션용
+  destB: null, trackB: null,   // 두 번째 세션용
   buf: null,
 };
 
 function buildAudioPipeline() {
-  if (audioPipeline.outboundTrack) return audioPipeline; // 이미 구축됨
+  if (audioPipeline.trackA && audioPipeline.trackB) return audioPipeline;
   if (!micStream) throw new Error('마이크 스트림이 없습니다.');
 
   const ctx = getVadContext();
@@ -100,22 +103,27 @@ function buildAudioPipeline() {
 
   const source = ctx.createMediaStreamSource(micStream);
 
-  // 1) 분석 분기 — destination 미연결, 출력 영향 없음
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 512;
   analyser.smoothingTimeConstant = 0.4;
   source.connect(analyser);
 
-  // 2) 송신 분기 — GainNode로 게이팅 후 MediaStreamDestination으로
   const gate = ctx.createGain();
-  gate.gain.value = 1; // 평소 1, VAD가 0으로 게이팅
-  const destination = ctx.createMediaStreamDestination();
-  source.connect(gate).connect(destination);
+  gate.gain.value = 1;
+  source.connect(gate);
 
-  const outboundTrack = destination.stream.getAudioTracks()[0];
+  // 두 개의 destination — 각 PC가 자기 트랙을 갖게
+  const destA = ctx.createMediaStreamDestination();
+  const destB = ctx.createMediaStreamDestination();
+  gate.connect(destA);
+  gate.connect(destB);
+
+  const trackA = destA.stream.getAudioTracks()[0];
+  const trackB = destB.stream.getAudioTracks()[0];
 
   audioPipeline = {
-    ctx, source, analyser, gate, destination, outboundTrack,
+    ctx, source, analyser, gate,
+    destA, trackA, destB, trackB,
     buf: new Float32Array(analyser.fftSize),
   };
   return audioPipeline;
@@ -125,10 +133,11 @@ function destroyAudioPipeline() {
   try { audioPipeline.source?.disconnect(); } catch {}
   try { audioPipeline.analyser?.disconnect(); } catch {}
   try { audioPipeline.gate?.disconnect(); } catch {}
-  try { audioPipeline.destination?.disconnect(); } catch {}
+  try { audioPipeline.destA?.disconnect(); } catch {}
+  try { audioPipeline.destB?.disconnect(); } catch {}
   audioPipeline = {
     ctx: null, source: null, analyser: null, gate: null,
-    destination: null, outboundTrack: null, buf: null,
+    destA: null, trackA: null, destB: null, trackB: null, buf: null,
   };
 }
 
@@ -459,17 +468,15 @@ async function initSessions() {
   const [meToPartner, partnerToMe] = await Promise.all([
     openSession({
       targetLanguage: partnerLang,
-      outboundTrack: pipeline.outboundTrack,
+      outboundTrack: pipeline.trackA, // 첫 번째 PC용 전용 트랙
       audioOut: els.audioMeToPartner,
-      // 내가 말함 → 상대 패널에 통역 음성이 흘러나옴
       onSpeakingStart: () => onSpeaking('partner', true),
       onSpeakingEnd: () => onSpeaking('partner', false),
     }),
     openSession({
       targetLanguage: myLang,
-      outboundTrack: pipeline.outboundTrack,
+      outboundTrack: pipeline.trackB, // 두 번째 PC용 전용 트랙
       audioOut: els.audioPartnerToMe,
-      // 상대가 말함 → 내 패널에 통역 음성이 흘러나옴
       onSpeakingStart: () => onSpeaking('me', true),
       onSpeakingEnd: () => onSpeaking('me', false),
     }),
