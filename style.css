@@ -233,6 +233,13 @@ body::after {
   opacity: 0.5;
   font-style: italic;
   font-weight: 400;
+  transition: opacity 0.4s ease-out;
+}
+
+/* 한 번이라도 자막이 채워졌다 비워진 상태에서는 placeholder를 더 옅게
+   (반복적으로 placeholder가 깜빡이는 느낌을 줄임) */
+.subtitle[data-spent="1"]:empty::before {
+  opacity: 0.25;
 }
 
 .subtitle--src {

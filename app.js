@@ -300,25 +300,99 @@ async function initSessions() {
   els.pttPartner.disabled = false;
 }
 
-const MAX_LINES = 6;
-function appendSubtitle(el, delta) {
-  el.textContent += delta;
-  // 너무 길어지면 마지막 몇 줄만 유지
-  const lines = el.textContent.split('\n');
-  if (lines.length > MAX_LINES) {
-    el.textContent = lines.slice(-MAX_LINES).join('\n');
+/* ============================================
+   자막 관리: 발화 단위 + 페이드 아웃
+   ============================================ */
+
+const MAX_CHARS = 240;        // 한 발화 내 글자 수 상한 (넘으면 앞쪽 잘림)
+const FADE_DELAY_MS = 3500;   // 발화 완료 후 페이드 아웃까지 대기
+const FADE_DURATION_MS = 600; // 페이드 아웃 자체 시간
+
+// 각 자막 element별 상태: { fadeTimer, removeTimer, isFading }
+const subtitleState = new WeakMap();
+
+function getSubState(el) {
+  let s = subtitleState.get(el);
+  if (!s) {
+    s = { fadeTimer: null, removeTimer: null, isFading: false };
+    subtitleState.set(el, s);
   }
-  el.scrollTop = el.scrollHeight;
+  return s;
+}
+
+function cancelFade(el) {
+  const s = getSubState(el);
+  if (s.fadeTimer) { clearTimeout(s.fadeTimer); s.fadeTimer = null; }
+  if (s.removeTimer) { clearTimeout(s.removeTimer); s.removeTimer = null; }
+  if (s.isFading) {
+    el.style.transition = '';
+    el.style.opacity = '';
+    s.isFading = false;
+  }
+}
+
+function appendSubtitle(el, delta) {
+  // 새 델타가 들어옴 = 발화 진행 중. 페이드 예약을 취소.
+  cancelFade(el);
+
+  // 페이드 아웃이 끝나 비어있는 상태였다면 깨끗하게 시작
+  if (el.dataset.spent === '1') {
+    el.textContent = '';
+    el.dataset.spent = '';
+  }
+
+  el.textContent += delta;
+
+  // 너무 길어지면 앞쪽 잘라내기 (한 발화 내 누적 방지)
+  if (el.textContent.length > MAX_CHARS) {
+    el.textContent = '…' + el.textContent.slice(-MAX_CHARS);
+  }
+}
+
+/**
+ * 발화 완료 신호. 일정 시간 후 자막을 페이드 아웃해서 비움.
+ */
+function scheduleFadeOut(el) {
+  if (!el.textContent) return;
+  cancelFade(el);
+  const s = getSubState(el);
+
+  s.fadeTimer = setTimeout(() => {
+    s.fadeTimer = null;
+    s.isFading = true;
+    el.style.transition = `opacity ${FADE_DURATION_MS}ms ease-out`;
+    el.style.opacity = '0';
+
+    s.removeTimer = setTimeout(() => {
+      s.removeTimer = null;
+      s.isFading = false;
+      el.textContent = '';
+      el.dataset.spent = '1';
+      el.style.transition = '';
+      el.style.opacity = '';
+    }, FADE_DURATION_MS);
+  }, FADE_DELAY_MS);
 }
 
 function clearSubtitlesFor(direction) {
-  if (direction === 'meToPartner') {
-    els.meSrc.textContent = '';
-    els.partnerDst.textContent = '';
-  } else {
-    els.partnerSrc.textContent = '';
-    els.meDst.textContent = '';
+  const targets = direction === 'meToPartner'
+    ? [els.meSrc, els.partnerDst]
+    : [els.partnerSrc, els.meDst];
+  for (const el of targets) {
+    cancelFade(el);
+    el.textContent = '';
+    el.dataset.spent = '';
   }
+}
+
+/**
+ * 한 방향의 자막 두 줄(원문/번역)에 동시에 페이드 아웃 예약
+ */
+function scheduleFadeOutForDirection(direction) {
+  const targets = direction === 'meToPartner'
+    ? [els.meSrc, els.partnerDst]
+    : [els.partnerSrc, els.meDst];
+  for (const el of targets) scheduleFadeOut(el);
 }
 
 /**
@@ -351,7 +425,10 @@ function startTalk(direction) {
 
   active.micTrack.enabled = true;
 
-  clearSubtitlesFor(direction);
+  // 새 발화 시작 → 이전 자막 정리 (양방향 모두)
+  // 페이드 아웃 진행 중이던 것도 즉시 제거되어 화면이 깨끗해진다.
+  clearSubtitlesFor('meToPartner');
+  clearSubtitlesFor('partnerToMe');
 
   const btn = direction === 'meToPartner' ? els.pttMe : els.pttPartner;
   btn.classList.add('is-active');
@@ -416,6 +493,8 @@ function stopTalk() {
     if (shouldStop) {
       clearInterval(timer);
       try { active.sender.replaceTrack(null); } catch {}
+      // 발화 끝났으니 잠시 후 자막 자동 정리
+      scheduleFadeOutForDirection(direction);
       finishGrace();
     }
   }, 100);
