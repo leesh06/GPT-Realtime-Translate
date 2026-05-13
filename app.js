@@ -147,21 +147,15 @@ function destroyAudioPipeline() {
 }
 
 /* ============================================
-   VAD — 자동 종료 타이머 전용
+   게이트 (송신 GainNode 제어)
    ============================================
-   탭 토글 모드에서는 마이크를 중간에 게이팅하지 않는다.
-   (게이팅이 다시 풀릴 때 자기 통역 음성을 입력으로 잡아 에코가 발생했음)
-
-   대신 VAD는 한 가지 일만 함: 5초 이상 침묵이 지속되면 발화 자동 종료.
+   사용자가 탭으로 명시 종료할 때까지 마이크 송신을 유지한다.
+   자동 종료는 사용하지 않음 — 사용자 의도에만 반응.
 */
-const VAD_AUTO_END_MS = 5000;   // 이 시간 이상 조용하면 자동 종료
-const VAD_CHECK_INTERVAL = 100;
-const VAD_THRESHOLD = 0.018;
 const VAD_RAMP_MS = 40;
 
 let vad = {
   timer: null,
-  lastVoiceAt: 0,
 };
 
 function applyGain(value) {
@@ -188,38 +182,12 @@ function rampOutputGate(session, value) {
 }
 
 function startVAD() {
-  if (vad.timer) return;
-  if (!audioPipeline.analyser) return;
-
-  vad.lastVoiceAt = Date.now();
+  // 송신 게이트 ON. 자동 종료는 없음 — 사용자가 탭으로 끌 때까지 유지.
   applyGain(1);
-
-  vad.timer = setInterval(() => {
-    if (!activeDirection) return;
-    audioPipeline.analyser.getFloatTimeDomainData(audioPipeline.buf);
-
-    let sum = 0;
-    const buf = audioPipeline.buf;
-    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
-    const rms = Math.sqrt(sum / buf.length);
-
-    const now = Date.now();
-    if (rms > VAD_THRESHOLD) {
-      vad.lastVoiceAt = now;
-    } else if (now - vad.lastVoiceAt >= VAD_AUTO_END_MS) {
-      // 5초간 조용함 → 발화 자동 종료
-      console.log('[VAD] 자동 종료 (5초 침묵)');
-      stopTalk();
-    }
-  }, VAD_CHECK_INTERVAL);
 }
 
 function stopVAD() {
-  if (vad.timer) {
-    clearInterval(vad.timer);
-    vad.timer = null;
-  }
-  applyGain(1);
+  applyGain(1); // 안전: 다음 활성화 대비 기본값으로
 }
 
 function setStatus(text, kind = '') {
