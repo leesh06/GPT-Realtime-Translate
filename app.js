@@ -172,6 +172,21 @@ function applyGain(value) {
   audioPipeline.gate.gain.linearRampToValueAtTime(value, now + VAD_RAMP_MS / 1000);
 }
 
+/**
+ * 세션의 출력 게이트 ramp.
+ * @param {object} session - sessions.meToPartner 또는 sessions.partnerToMe
+ * @param {number} value   - 0이면 음소거, 1이면 출력
+ */
+function rampOutputGate(session, value) {
+  if (!session?.state?.outputGate || !session.state.outputCtx) return;
+  const ctx = session.state.outputCtx;
+  const gate = session.state.outputGate;
+  const now = ctx.currentTime;
+  gate.gain.cancelScheduledValues(now);
+  gate.gain.setValueAtTime(gate.gain.value, now);
+  gate.gain.linearRampToValueAtTime(value, now + 0.05);
+}
+
 function startVAD() {
   if (vad.timer) return;
   if (!audioPipeline.analyser) return;
@@ -254,8 +269,11 @@ function getVadContext() {
 // 하위 호환: 기존에 getAudioContext() 호출하던 경로는 출력 컨텍스트로 라우팅
 function getAudioContext() { return getOutputContext(); }
 
+/**
+ * 라우드스피커로 출력하면서 게이트(GainNode)도 함께 반환.
+ * 비활성 세션은 게이트를 0으로 두어 통역 음성이 안 들리게 한다.
+ */
 function routeToLoudspeaker(stream, sinkEl) {
-  // (1) iOS 안전장치
   try {
     sinkEl.srcObject = stream;
     sinkEl.muted = true;
@@ -264,21 +282,24 @@ function routeToLoudspeaker(stream, sinkEl) {
     sinkEl.play?.().catch(() => {});
   } catch {}
 
-  // (2) AudioContext 경로로 재생 + analyser tap
   try {
     const ctx = getAudioContext();
     const src = ctx.createMediaStreamSource(stream);
-    const gain = ctx.createGain();
-    gain.gain.value = 1.6;
+    const outputGate = ctx.createGain();
+    // 시작은 0 (출력 차단). 활성 시점에 1.6으로 ramp 한다.
+    outputGate.gain.value = 0;
+    const finalGain = ctx.createGain();
+    finalGain.gain.value = 1.6;
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 512;
     analyser.smoothingTimeConstant = 0.7;
-    // src -> gain -> destination (들리는 경로)
-    // src -> analyser (시각화 분기)
-    src.connect(gain);
-    gain.connect(ctx.destination);
-    src.connect(analyser);
-    return analyser;
+
+    src.connect(outputGate);
+    outputGate.connect(finalGain);
+    finalGain.connect(ctx.destination);
+    src.connect(analyser); // 시각화는 게이트 무관하게 항상 측정
+
+    return { analyser, outputGate, ctx };
   } catch (err) {
     console.warn('AudioContext routing 실패, srcObject 폴백:', err);
     try {
@@ -335,16 +356,23 @@ async function openSession({ targetLanguage, outboundTrack, audioOut, onSpeaking
     completed: false,          // 마지막 발화에 대한 결과를 모두 받았는지
     speaking: false,           // 통역 음성 출력 중인지
     outputAnalyser: null,      // 출력 음성 시각화용 AnalyserNode
+    outputGate: null,          // 출력 게이트 (비활성 세션은 0)
+    outputCtx: null,           // 게이트가 속한 AudioContext (ramp용)
   };
   const markActivity = () => {
     state.lastDeltaAt = Date.now();
     state.completed = false;
   };
 
-  // 번역된 오디오 수신 + 시각화용 analyser
+  // 번역된 오디오 수신 + 출력 게이트 보관
   pc.ontrack = ({ streams }) => {
     if (!streams || !streams[0]) return;
-    state.outputAnalyser = routeToLoudspeaker(streams[0], audioOut);
+    const route = routeToLoudspeaker(streams[0], audioOut);
+    if (route) {
+      state.outputAnalyser = route.analyser;
+      state.outputGate = route.outputGate;
+      state.outputCtx = route.ctx;
+    }
   };
 
   // 송신 트랙 추가. PTT 비활성 상태에서는 replaceTrack(null)로 송신 끊을 예정.
@@ -479,9 +507,14 @@ async function initSessions() {
   sessions.meToPartner = meToPartner;
   sessions.partnerToMe = partnerToMe;
 
-  // 시작 직후엔 양쪽 sender에서 트랙 분리 (어느 방향도 송신 안 함)
+  // 시작 직후엔 양쪽 모두 차단 — 사용자가 PTT 누를 때만 활성
   try { meToPartner.sender.replaceTrack(null); } catch {}
   try { partnerToMe.sender.replaceTrack(null); } catch {}
+  if (pipeline.trackA) pipeline.trackA.enabled = false;
+  if (pipeline.trackB) pipeline.trackB.enabled = false;
+  // 출력 게이트도 0으로 시작 (ontrack 이후 0으로 초기화돼 있지만 보강)
+  rampOutputGate(meToPartner, 0);
+  rampOutputGate(partnerToMe, 0);
 
   setStatus('준비', 'ok');
   els.pttMe.disabled = false;
@@ -683,9 +716,16 @@ function startTalk(direction) {
   const active = sessions[direction];
   const inactive = direction === 'meToPartner' ? sessions.partnerToMe : sessions.meToPartner;
 
-  // 방향 게이팅: 활성 sender에만 합성 송신 트랙 연결, 반대편은 끊음
+  // 방향 게이팅 (3중 안전장치):
+  // 1) sender.replaceTrack — 표준 방식
+  // 2) outboundTrack.enabled 토글 — replaceTrack이 안 먹는 모바일 대비
+  // 3) 출력 게이트(GainNode) — 비활성 세션이 통역해도 안 들리게
   active.sender.replaceTrack(active.outboundTrack);
   inactive.sender.replaceTrack(null);
+  if (active.outboundTrack) active.outboundTrack.enabled = true;
+  if (inactive.outboundTrack) inactive.outboundTrack.enabled = false;
+  rampOutputGate(active, 1);
+  rampOutputGate(inactive, 0);
 
   startVAD();
 
@@ -779,6 +819,9 @@ function stopTalk() {
     if (shouldStop) {
       clearInterval(timer);
       try { active.sender.replaceTrack(null); } catch {}
+      if (active.outboundTrack) active.outboundTrack.enabled = false;
+      // 그레이스 끝 → 출력도 닫음 (이제 통역 음성 다 나왔을 것)
+      rampOutputGate(active, 0);
       finishGrace();
     }
   }, 100);
@@ -832,7 +875,10 @@ function switchTalk(newDirection) {
     activeDirection = null;
     stopVAD();
     applyGain(0);
-    try { sessions[prev].sender.replaceTrack(null); } catch {}
+    const prevSession = sessions[prev];
+    try { prevSession.sender.replaceTrack(null); } catch {}
+    if (prevSession.outboundTrack) prevSession.outboundTrack.enabled = false;
+    rampOutputGate(prevSession, 0);
     els.pttMe.classList.remove('is-active');
     els.pttPartner.classList.remove('is-active');
     els.panelMe.classList.remove('is-active');
