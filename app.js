@@ -982,10 +982,33 @@ async function bootstrap() {
   }
 }
 
+/* ============================================
+   온보딩
+   ============================================ */
+const ONBOARD_KEY = 'translate-onboard-seen';
+function showOnboardIfNeeded() {
+  const onboard = document.getElementById('onboard');
+  if (!onboard) return;
+  const seen = (() => {
+    try { return localStorage.getItem(ONBOARD_KEY); } catch { return null; }
+  })();
+  if (seen === 'skip') return; // 다시 보지 않기 선택한 사용자
+
+  onboard.hidden = false;
+
+  const close = () => { onboard.hidden = true; };
+  document.getElementById('onboardClose').addEventListener('click', close);
+  document.getElementById('onboardSkip').addEventListener('click', () => {
+    try { localStorage.setItem(ONBOARD_KEY, 'skip'); } catch {}
+    close();
+  });
+}
+
 function init() {
   updateLangBadges();
   defaultHints();
   initVisualizers();
+  showOnboardIfNeeded();
   els.myLang.addEventListener('change', () => {
     updateLangBadges();
     reinitOnLangChange();

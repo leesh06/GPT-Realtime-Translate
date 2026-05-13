@@ -124,6 +124,48 @@
     <audio id="audioPartnerToMe" autoplay playsinline></audio>
   </div>
 
+  <!-- 첫 진입 시 사용 가이드 -->
+  <div class="onboard" id="onboard" hidden>
+    <div class="onboard__card">
+      <div class="onboard__hero">🎧</div>
+      <h2 class="onboard__title">이어폰을 끼고 써주세요</h2>
+      <p class="onboard__lead">
+        통역 음성이 폰 스피커로 나오면 다시 마이크에 들어가
+        같은 통역이 반복될 수 있어요.
+      </p>
+
+      <div class="onboard__steps">
+        <div class="onboard__step">
+          <div class="onboard__num">1</div>
+          <div>
+            <div class="onboard__heading">블루투스 이어폰 연결</div>
+            <div class="onboard__desc">유선이어도 마이크 없는 헤드폰이면 OK</div>
+          </div>
+        </div>
+        <div class="onboard__step">
+          <div class="onboard__num">2</div>
+          <div>
+            <div class="onboard__heading">통화 오디오 끄기 · 미디어 오디오만 켜기</div>
+            <div class="onboard__desc">
+              설정 → 블루투스 → 연결된 이어폰 → 통화 오디오 OFF<br>
+              미디어 오디오는 ON 유지
+            </div>
+          </div>
+        </div>
+        <div class="onboard__step">
+          <div class="onboard__num">3</div>
+          <div>
+            <div class="onboard__heading">화면을 한 번 탭하고 시작</div>
+            <div class="onboard__desc">마이크는 폰, 통역은 이어폰으로</div>
+          </div>
+        </div>
+      </div>
+
+      <button class="onboard__cta" id="onboardClose" type="button">시작하기</button>
+      <button class="onboard__skip" id="onboardSkip" type="button">다시 보지 않기</button>
+    </div>
+  </div>
+
   <script type="module" src="/app.js"></script>
 </body>
 </html>
