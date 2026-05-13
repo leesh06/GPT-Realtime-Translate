@@ -1,4 +1,4 @@
-const CACHE = 'translate-shell-v1';
+const CACHE = 'translate-shell-v2';
 const SHELL = [
   '/',
   '/index.html',

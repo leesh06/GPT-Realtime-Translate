@@ -746,10 +746,40 @@ function init() {
 
   setStatus('화면을 탭하세요');
 
-  // 서비스워커 등록
+  // 서비스워커 등록 — 페이지 로드 후 즉시 (PWA 설치 가능 판정용)
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/service-worker.js').catch(() => {});
+    const reg = () => {
+      navigator.serviceWorker.register('/service-worker.js', { scope: '/' })
+        .then((r) => console.log('[SW] registered, scope:', r.scope))
+        .catch((err) => console.warn('[SW] register failed:', err));
+    };
+    if (document.readyState === 'complete') reg();
+    else window.addEventListener('load', reg, { once: true });
   }
+
+  // PWA 설치 프롬프트 캐치 — 가능하면 사용자에게 안내
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredInstallPrompt = e;
+    console.log('[PWA] beforeinstallprompt captured');
+    // TODO: 화면에 "설치하기" 버튼 표시 (필요 시)
+  });
+  window.addEventListener('appinstalled', () => {
+    console.log('[PWA] app installed');
+    deferredInstallPrompt = null;
+  });
 }
+
+let deferredInstallPrompt = null;
+window.installPWA = async function () {
+  if (!deferredInstallPrompt) {
+    alert('설치 프롬프트가 아직 준비되지 않았어요. 페이지를 새로고침해보세요.');
+    return;
+  }
+  deferredInstallPrompt.prompt();
+  const { outcome } = await deferredInstallPrompt.userChoice;
+  console.log('[PWA] install outcome:', outcome);
+  deferredInstallPrompt = null;
+};
 
 init();
