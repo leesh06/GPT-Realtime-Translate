@@ -53,6 +53,37 @@ const sessions = {
 let micStream = null;
 let activeDirection = null; // 'meToPartner' | 'partnerToMe' | null
 
+/* ============================================
+   에코 피드백 차단 (mic ducking)
+   ============================================
+   통역 음성이 스피커로 나오는 동안 같은 폰의 마이크에 그 소리가 다시 잡혀서
+   무한 통역 루프가 도는 현상을 막는다.
+   출력 오디오 델타가 들어오면 mic.enabled = false로 잠깐 차단.
+   델타가 멎고 일정 시간 지나면 다시 활성화.
+*/
+const DUCK_RELEASE_MS = 350; // 마지막 출력 델타 후 이만큼 지나면 마이크 복귀
+let duckReleaseTimer = null;
+let isDucked = false;
+
+function duckMic() {
+  if (!activeDirection || !micStream) return;
+  if (!isDucked) {
+    isDucked = true;
+    micStream.getAudioTracks().forEach((t) => (t.enabled = false));
+  }
+  if (duckReleaseTimer) clearTimeout(duckReleaseTimer);
+  duckReleaseTimer = setTimeout(unduckMic, DUCK_RELEASE_MS);
+}
+
+function unduckMic() {
+  duckReleaseTimer = null;
+  isDucked = false;
+  // 여전히 PTT가 눌려있을 때만 복귀 (손 뗐다면 stopTalk가 이미 처리)
+  if (activeDirection && micStream) {
+    micStream.getAudioTracks().forEach((t) => (t.enabled = true));
+  }
+}
+
 function setStatus(text, kind = '') {
   els.status.textContent = text;
   els.status.classList.remove('is-ok', 'is-error', 'is-listening');
@@ -191,6 +222,8 @@ async function openSession({ targetLanguage, micTrack, audioOut, onSrc, onDst })
     }
     if (evt.type === 'session.output_audio.delta') {
       markActivity();
+      // 같은 폰에서 출력 음성이 마이크로 다시 들어가지 않도록 마이크 일시 차단
+      duckMic();
     }
     if (evt.type === 'session.input_transcript.completed') onSrc('\n');
     if (evt.type === 'session.output_transcript.completed') {
@@ -245,12 +278,12 @@ function waitForConnected(pc, timeoutMs = 10000) {
 
 async function ensureMic() {
   if (micStream) return micStream;
-  // 중요: echoCancellation을 true로 두면 모바일 브라우저가 출력을 통화모드(이어피스)로
-  // 강제 라우팅하는 경향이 있다. PTT 방식에서는 말하는 동안 상대 음성이 안 나오므로
-  // 에코 캔슬이 거의 불필요 → false로 둬서 라우드스피커 유지.
+  // echoCancellation을 켜면 모바일에서 통화모드로 라우팅될 수 있지만,
+  // 우리는 출력을 AudioContext로 분리해서 재생하므로 라우드스피커 유지가 가능하다.
+  // 켜두면 스피커→마이크 피드백 루프를 1차로 막아준다.
   micStream = await navigator.mediaDevices.getUserMedia({
     audio: {
-      echoCancellation: false,
+      echoCancellation: true,
       noiseSuppression: true,
       autoGainControl: true,
     },
@@ -424,6 +457,9 @@ function startTalk(direction) {
   inactive.sender.replaceTrack(null);
 
   active.micTrack.enabled = true;
+  // ducking 상태 초기화
+  isDucked = false;
+  if (duckReleaseTimer) { clearTimeout(duckReleaseTimer); duckReleaseTimer = null; }
 
   // 새 발화 시작 → 이전 자막 정리 (양방향 모두)
   // 페이드 아웃 진행 중이던 것도 즉시 제거되어 화면이 깨끗해진다.
@@ -458,6 +494,9 @@ function stopTalk() {
   if (micStream) {
     micStream.getAudioTracks().forEach((t) => (t.enabled = false));
   }
+  // ducking 타이머 정리
+  if (duckReleaseTimer) { clearTimeout(duckReleaseTimer); duckReleaseTimer = null; }
+  isDucked = false;
 
   // 2) UI는 곧바로 "통역 마무리 중" 상태로
   els.pttMe.classList.remove('is-active');
