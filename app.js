@@ -61,6 +61,11 @@ function setHint(side, text) {
   el.querySelector('.hint-text').textContent = text;
 }
 
+function setButtonLabel(side, text) {
+  const el = side === 'me' ? els.pttMeLabel : els.pttPartnerLabel;
+  if (el) el.textContent = text;
+}
+
 // 세션 객체 두 개를 보관
 const sessions = {
   // 내가 말함 → 상대 언어로 통역 (상대가 듣는 음성)
@@ -142,20 +147,21 @@ function destroyAudioPipeline() {
 }
 
 /* ============================================
-   VAD — GainNode 게이팅 사용
+   VAD — 자동 종료 타이머 전용
    ============================================
-   마이크 트랙은 항상 활성, 대신 송신 볼륨만 0/1로 토글한다.
-   따라서 사용자가 다시 말하기 시작하면 RMS가 즉시 올라가서 감지됨.
+   탭 토글 모드에서는 마이크를 중간에 게이팅하지 않는다.
+   (게이팅이 다시 풀릴 때 자기 통역 음성을 입력으로 잡아 에코가 발생했음)
+
+   대신 VAD는 한 가지 일만 함: 5초 이상 침묵이 지속되면 발화 자동 종료.
 */
-const VAD_SILENCE_MS = 1200;
-const VAD_CHECK_INTERVAL = 80;
+const VAD_AUTO_END_MS = 5000;   // 이 시간 이상 조용하면 자동 종료
+const VAD_CHECK_INTERVAL = 100;
 const VAD_THRESHOLD = 0.018;
-const VAD_RAMP_MS = 30;     // gain 변경 시 살짝 ramp (클릭/팝 노이즈 방지)
+const VAD_RAMP_MS = 40;
 
 let vad = {
   timer: null,
   lastVoiceAt: 0,
-  gatedOff: false,
 };
 
 function applyGain(value) {
@@ -171,7 +177,6 @@ function startVAD() {
   if (!audioPipeline.analyser) return;
 
   vad.lastVoiceAt = Date.now();
-  vad.gatedOff = false;
   applyGain(1);
 
   vad.timer = setInterval(() => {
@@ -184,22 +189,12 @@ function startVAD() {
     const rms = Math.sqrt(sum / buf.length);
 
     const now = Date.now();
-    const isVoice = rms > VAD_THRESHOLD;
-
-    if (isVoice) {
+    if (rms > VAD_THRESHOLD) {
       vad.lastVoiceAt = now;
-      if (vad.gatedOff) {
-        applyGain(1);
-        vad.gatedOff = false;
-        setStatus('듣는 중', 'listening');
-      }
-    } else {
-      const silentFor = now - vad.lastVoiceAt;
-      if (silentFor >= VAD_SILENCE_MS && !vad.gatedOff) {
-        applyGain(0);
-        vad.gatedOff = true;
-        setStatus('대기 중', 'ok');
-      }
+    } else if (now - vad.lastVoiceAt >= VAD_AUTO_END_MS) {
+      // 5초간 조용함 → 발화 자동 종료
+      console.log('[VAD] 자동 종료 (5초 침묵)');
+      stopTalk();
     }
   }, VAD_CHECK_INTERVAL);
 }
@@ -209,8 +204,7 @@ function stopVAD() {
     clearInterval(vad.timer);
     vad.timer = null;
   }
-  vad.gatedOff = false;
-  applyGain(1); // 안전: 게이트 복귀해서 다음 세션에 영향 없게
+  applyGain(1);
 }
 
 function setStatus(text, kind = '') {
@@ -656,8 +650,8 @@ window.addEventListener('resize', () => {
 */
 
 function defaultHints() {
-  setHint('me', '파란색 버튼을 누르고 말하세요');
-  setHint('partner', '보라색 버튼을 누르고 말하세요');
+  setHint('me', '파란색 버튼을 탭해서 시작');
+  setHint('partner', '보라색 버튼을 탭해서 시작');
 }
 
 function onSpeaking(side, isStart) {
@@ -669,8 +663,8 @@ function onSpeaking(side, isStart) {
     panel.classList.remove('is-speaking');
     if (!panel.classList.contains('is-active')) {
       const text = side === 'me'
-        ? '파란색 버튼을 누르고 말하세요'
-        : '보라색 버튼을 누르고 말하세요';
+        ? '파란색 버튼을 탭해서 시작'
+        : '보라색 버튼을 탭해서 시작';
       setHint(side, text);
     }
   }
@@ -700,11 +694,13 @@ function startTalk(direction) {
   if (direction === 'meToPartner') {
     els.panelMe.classList.add('is-active');
     els.panelPartner.classList.remove('is-active');
-    setHint('me', '말씀하세요');
+    setHint('me', '말씀하세요 · 다시 탭하면 종료');
+    setButtonLabel('me', '멈춤');
   } else {
     els.panelPartner.classList.add('is-active');
     els.panelMe.classList.remove('is-active');
-    setHint('partner', '말씀하세요');
+    setHint('partner', '말씀하세요 · 다시 탭하면 종료');
+    setButtonLabel('partner', '멈춤');
   }
   setStatus('듣는 중', 'listening');
   haptic(15);
@@ -743,11 +739,17 @@ function stopTalk() {
   setStatus('마무리 중', 'ok');
   // 통역 중 표시(.is-speaking)는 그대로 두고, 출력이 끝날 때 onSpeakingEnd가 정리.
   // 입력 쪽 힌트(말씀하세요)는 즉시 기본으로 복귀
+  // 라벨 복귀 (언어 이름으로)
+  const my = els.myLang.value;
+  const partner = els.partnerLang.value;
+  setButtonLabel('me', LANG_TO_SHORT[my] || my.toUpperCase());
+  setButtonLabel('partner', LANG_TO_SHORT[partner] || partner.toUpperCase());
+
   if (direction === 'meToPartner' && !els.panelMe.classList.contains('is-speaking')) {
-    setHint('me', '파란색 버튼을 누르고 말하세요');
+    setHint('me', '파란색 버튼을 탭해서 시작');
   }
   if (direction === 'partnerToMe' && !els.panelPartner.classList.contains('is-speaking')) {
-    setHint('partner', '보라색 버튼을 누르고 말하세요');
+    setHint('partner', '보라색 버튼을 탭해서 시작');
   }
   haptic(8);
 
@@ -789,28 +791,56 @@ function finishGrace() {
 }
 
 // PTT 이벤트 바인딩 (마우스 + 터치 + 키보드)
+/**
+ * 탭 토글 방식:
+ * - 한 번 탭 → 그 방향 녹음 시작
+ * - 같은 버튼 다시 탭 → 종료
+ * - 다른 쪽 버튼 탭 → 자동 화자 전환 (이전 끄고 새로 시작)
+ * - 5초 침묵 → 자동 종료
+ */
 function bindPTT(btn, direction) {
-  const start = (e) => {
+  const onClick = (e) => {
     e.preventDefault();
-    // 손가락이 버튼 밖으로 살짝 밀려도 이 버튼이 이벤트를 계속 받게
-    try { btn.setPointerCapture?.(e.pointerId); } catch {}
-    startTalk(direction);
-  };
-  const end = (e) => {
-    e.preventDefault();
-    try { btn.releasePointerCapture?.(e.pointerId); } catch {}
-    stopTalk();
+    if (activeDirection === direction) {
+      // 같은 버튼 다시 탭 → 종료
+      stopTalk();
+    } else if (activeDirection) {
+      // 다른 쪽이 활성 중 → 화자 전환
+      switchTalk(direction);
+    } else {
+      startTalk(direction);
+    }
   };
 
-  btn.addEventListener('pointerdown', start);
-  btn.addEventListener('pointerup', end);
-  btn.addEventListener('pointercancel', end);
-  // 텍스트 선택, 컨텍스트 메뉴, 드래그 시작 모두 차단
+  btn.addEventListener('click', onClick);
   btn.addEventListener('contextmenu', (e) => e.preventDefault());
   btn.addEventListener('selectstart', (e) => e.preventDefault());
   btn.addEventListener('dragstart', (e) => e.preventDefault());
-  // touchstart에서도 한 번 더 — 일부 안드 브라우저에서 click 합성 막기
-  btn.addEventListener('touchstart', (e) => e.preventDefault(), { passive: false });
+}
+
+/**
+ * 활성 방향을 바꿔서 다른 사람 차례로 즉시 전환.
+ * stopTalk의 그레이스(통역 마무리)를 기다리지 않고 바로 새 발화 시작.
+ */
+function switchTalk(newDirection) {
+  if (!sessions.meToPartner || !sessions.partnerToMe) return;
+  if (activeDirection === newDirection) return;
+
+  // 이전 방향 정리 (그레이스 짧게)
+  const prev = activeDirection;
+  if (prev) {
+    activeDirection = null;
+    stopVAD();
+    applyGain(0);
+    try { sessions[prev].sender.replaceTrack(null); } catch {}
+    els.pttMe.classList.remove('is-active');
+    els.pttPartner.classList.remove('is-active');
+    els.panelMe.classList.remove('is-active');
+    els.panelPartner.classList.remove('is-active');
+  }
+
+  // 즉시 새 방향 시작
+  startTalk(newDirection);
 }
 
 async function reinitOnLangChange() {
@@ -877,6 +907,7 @@ function tearDown(reason = 'background') {
   els.pttPartner.classList.remove('is-active');
   els.panelMe.classList.remove('is-active', 'is-speaking');
   els.panelPartner.classList.remove('is-active', 'is-speaking');
+  updateLangBadges();
   defaultHints();
   setStatus('화면을 탭하세요');
 }

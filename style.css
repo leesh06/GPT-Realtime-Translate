@@ -437,10 +437,10 @@ body::before {
   box-shadow:
     0 0 0 6px var(--me-soft),
     0 12px 32px -8px var(--me-glow);
-  animation: breath 1.8s var(--ease) infinite;
+  animation: breath 2.6s var(--ease) infinite;
 }
 .ptt--me.is-active::before {
-  animation: ring 1.8s var(--ease) infinite;
+  animation: ring 2.6s var(--ease) infinite;
 }
 
 .ptt--partner.is-active {
@@ -450,10 +450,10 @@ body::before {
   box-shadow:
     0 0 0 6px var(--partner-soft),
     0 12px 32px -8px var(--partner-glow);
-  animation: breath 1.8s var(--ease) infinite;
+  animation: breath 2.6s var(--ease) infinite;
 }
 .ptt--partner.is-active::before {
-  animation: ring 1.8s var(--ease) infinite;
+  animation: ring 2.6s var(--ease) infinite;
 }
 
 @keyframes breath {
@@ -477,7 +477,15 @@ body::before {
   width: 26px;
   height: 26px;
   flex-shrink: 0;
+  transition: opacity 0.2s var(--ease), transform 0.25s var(--ease);
 }
+
+/* 평소: 마이크 아이콘 표시, 정지 아이콘은 숨김 */
+.ptt__icon--stop { display: none; }
+
+/* 활성: 마이크 → 정지 사각형으로 전환 */
+.ptt.is-active .ptt__icon--mic { display: none; }
+.ptt.is-active .ptt__icon--stop { display: block; }
 
 .ptt__label {
   font-size: 11px;
