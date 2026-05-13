@@ -1,0 +1,515 @@
+/* ============================================
+   실시간 통역 PWA — 모바일 우선 디자인
+   ============================================ */
+
+:root {
+  /* 컬러 */
+  --bg-0: #06081a;
+  --bg-1: #0d1230;
+  --bg-2: #161c44;
+  --surface: rgba(255, 255, 255, 0.06);
+  --surface-strong: rgba(255, 255, 255, 0.1);
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+
+  --text: #f5f7ff;
+  --text-soft: #c8cee8;
+  --text-dim: #8a92b8;
+
+  --accent-me: #6c8cff;
+  --accent-me-2: #4a6cff;
+  --accent-partner: #ff7ab6;
+  --accent-partner-2: #d65a99;
+  --accent-glow-me: rgba(108, 140, 255, 0.45);
+  --accent-glow-partner: rgba(255, 122, 182, 0.45);
+
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --err: #ff5470;
+
+  /* 사이즈 */
+  --radius-sm: 12px;
+  --radius-md: 18px;
+  --radius-lg: 28px;
+  --radius-pill: 999px;
+
+  --gap: 12px;
+  --pad: 16px;
+
+  --ptt-size: clamp(76px, 22vw, 104px);
+  --ptt-icon: clamp(26px, 7vw, 34px);
+
+  /* 모션 */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: var(--bg-0);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Pretendard, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  font-size: 16px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  touch-action: manipulation;
+}
+
+button, select {
+  font-family: inherit;
+}
+
+/* 배경 오로라 */
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+body::before {
+  background:
+    radial-gradient(80vw 80vw at 0% 0%, rgba(108, 140, 255, 0.18), transparent 60%),
+    radial-gradient(80vw 80vw at 100% 100%, rgba(255, 122, 182, 0.18), transparent 60%),
+    var(--bg-0);
+}
+body::after {
+  background:
+    radial-gradient(50vw 50vw at 90% 10%, rgba(108, 140, 255, 0.08), transparent 70%),
+    radial-gradient(50vw 50vw at 10% 90%, rgba(255, 122, 182, 0.08), transparent 70%);
+  animation: drift 14s ease-in-out infinite alternate;
+}
+@keyframes drift {
+  from { transform: translate3d(-2%, 0, 0) scale(1); }
+  to { transform: translate3d(2%, -2%, 0) scale(1.05); }
+}
+
+/* ============================================
+   레이아웃
+   ============================================ */
+
+.app {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-rows: 1fr auto 1fr;
+  height: 100dvh;
+  padding:
+    calc(env(safe-area-inset-top, 0px) + 8px)
+    calc(env(safe-area-inset-right, 0px) + 8px)
+    calc(env(safe-area-inset-bottom, 0px) + 8px)
+    calc(env(safe-area-inset-left, 0px) + 8px);
+  gap: var(--gap);
+}
+
+/* ============================================
+   패널 (자막 영역)
+   ============================================ */
+
+.panel {
+  position: relative;
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
+    linear-gradient(180deg, var(--bg-1), var(--bg-2));
+  border: 1px solid var(--border);
+  overflow: hidden;
+  display: flex;
+  box-shadow:
+    0 20px 50px -20px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.panel--top {
+  transform: rotate(180deg);
+}
+
+.panel--top::after,
+.panel--bottom::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background:
+    radial-gradient(60% 80% at 50% 0%, rgba(108, 140, 255, 0.10), transparent 70%);
+}
+.panel--top::after {
+  background:
+    radial-gradient(60% 80% at 50% 0%, rgba(255, 122, 182, 0.10), transparent 70%);
+}
+
+.panel__inner {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: var(--pad);
+  min-height: 0;
+}
+
+/* ============================================
+   언어 칩
+   ============================================ */
+
+.lang-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 8px 12px 8px 14px;
+  border-radius: var(--radius-pill);
+  font-size: 13px;
+  font-weight: 600;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: background 0.2s var(--ease-out);
+}
+.lang-pill:hover { background: var(--surface-strong); }
+
+.flag {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.lang-select {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 0 14px 0 2px;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23c8cee8' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0 center;
+  cursor: pointer;
+}
+.lang-select option {
+  color: #000;
+  background: #fff;
+}
+
+/* ============================================
+   자막
+   ============================================ */
+
+.subtitles {
+  flex: 1;
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.subtitle {
+  margin: 0;
+  word-break: break-word;
+  white-space: pre-wrap;
+  min-height: 1.4em;
+  transition: opacity 0.3s var(--ease-out);
+}
+
+.subtitle:empty::before {
+  content: attr(data-placeholder);
+  color: var(--text-dim);
+  opacity: 0.5;
+  font-style: italic;
+  font-weight: 400;
+}
+
+.subtitle--src {
+  font-size: clamp(15px, 4vw, 18px);
+  color: var(--text-soft);
+  opacity: 0.7;
+  font-weight: 500;
+}
+
+.subtitle--dst {
+  font-size: clamp(22px, 6.5vw, 32px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+}
+
+/* 빈 상태 안내 */
+.panel--top .subtitle--src { order: 2; }
+.panel--top .subtitle--dst { order: 1; }
+
+/* ============================================
+   컨트롤 바
+   ============================================ */
+
+.controls {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  justify-items: center;
+  gap: 16px;
+  padding: 8px 20px;
+  position: relative;
+}
+
+.controls::before {
+  content: "";
+  position: absolute;
+  inset: 0 16px;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0));
+  pointer-events: none;
+}
+
+/* ============================================
+   Push-to-talk 버튼
+   ============================================ */
+
+.ptt {
+  position: relative;
+  width: var(--ptt-size);
+  height: var(--ptt-size);
+  border-radius: 50%;
+  border: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+  outline: none;
+  isolation: isolate;
+  transition:
+    transform 0.18s var(--ease-out),
+    box-shadow 0.25s var(--ease-out);
+}
+
+.ptt::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  z-index: -1;
+  background: linear-gradient(160deg, var(--btn-c1, var(--accent-me)), var(--btn-c2, var(--accent-me-2)));
+  box-shadow:
+    0 12px 28px -6px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25),
+    inset 0 -2px 6px rgba(0, 0, 0, 0.25);
+}
+
+.ptt::after {
+  /* 활성화 시 글로우 링 */
+  content: "";
+  position: absolute;
+  inset: -10px;
+  border-radius: 50%;
+  z-index: -2;
+  background: radial-gradient(circle, var(--btn-glow, var(--accent-glow-me)) 0%, transparent 70%);
+  opacity: 0;
+  transform: scale(0.85);
+  transition: opacity 0.25s var(--ease-out), transform 0.25s var(--ease-out);
+}
+
+.ptt--me {
+  --btn-c1: var(--accent-me);
+  --btn-c2: var(--accent-me-2);
+  --btn-glow: var(--accent-glow-me);
+}
+
+.ptt--partner {
+  --btn-c1: var(--accent-partner);
+  --btn-c2: var(--accent-partner-2);
+  --btn-glow: var(--accent-glow-partner);
+}
+
+.ptt:active { transform: scale(0.94); }
+
+.ptt.is-active {
+  transform: scale(1.06);
+  animation: pulse 1.4s var(--ease-in-out) infinite;
+}
+.ptt.is-active::after {
+  opacity: 1;
+  transform: scale(1);
+  animation: glow-pulse 1.4s var(--ease-in-out) infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { transform: scale(1.06); }
+  50% { transform: scale(1.12); }
+}
+
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.7; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+
+.ptt[disabled] {
+  opacity: 0.35;
+  cursor: not-allowed;
+  filter: saturate(0.5);
+}
+.ptt[disabled]::after { opacity: 0 !important; animation: none !important; }
+.ptt[disabled].is-active { animation: none; transform: scale(1); }
+
+.ptt__icon {
+  font-size: var(--ptt-icon);
+  line-height: 1;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
+}
+.ptt__label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  opacity: 0.95;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+/* ============================================
+   상태 표시
+   ============================================ */
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-soft);
+  text-align: center;
+  min-width: 96px;
+  max-width: 140px;
+  padding: 10px 14px;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  justify-content: center;
+}
+
+.status::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex-shrink: 0;
+  box-shadow: 0 0 0 0 transparent;
+  transition: background 0.3s var(--ease-out), box-shadow 0.3s var(--ease-out);
+}
+
+.status.is-ok { color: var(--ok); }
+.status.is-ok::before {
+  background: var(--ok);
+  box-shadow: 0 0 12px var(--ok);
+  animation: blink 2s var(--ease-in-out) infinite;
+}
+
+.status.is-listening {
+  color: var(--accent-me);
+  background: rgba(108, 140, 255, 0.12);
+  border-color: rgba(108, 140, 255, 0.3);
+}
+.status.is-listening::before {
+  background: var(--accent-me);
+  box-shadow: 0 0 16px var(--accent-me);
+  animation: blink 0.9s var(--ease-in-out) infinite;
+}
+
+.status.is-error { color: var(--err); }
+.status.is-error::before {
+  background: var(--err);
+  box-shadow: 0 0 12px var(--err);
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ============================================
+   숨김 요소
+   ============================================ */
+
+audio { display: none; }
+
+/* ============================================
+   접근성: 모션 감소
+   ============================================ */
+
+@media (prefers-reduced-motion: reduce) {
+  body::after,
+  .ptt.is-active,
+  .ptt.is-active::after,
+  .status.is-ok::before,
+  .status.is-listening::before {
+    animation: none !important;
+  }
+  .ptt { transition: transform 0.1s linear; }
+}
+
+/* ============================================
+   반응형
+   ============================================ */
+
+/* 가로 모드 — 패널을 좌우로 */
+@media (orientation: landscape) and (max-height: 500px) {
+  .app {
+    grid-template-rows: auto;
+    grid-template-columns: 1fr auto 1fr;
+  }
+  .panel--top { transform: rotate(180deg); }
+  .controls {
+    flex-direction: column;
+    grid-template-columns: auto;
+    grid-template-rows: 1fr auto 1fr;
+  }
+}
+
+/* 큰 폰 */
+@media (min-height: 800px) {
+  :root {
+    --ptt-size: clamp(96px, 24vw, 120px);
+    --gap: 16px;
+    --pad: 20px;
+  }
+  .subtitle--dst { font-size: clamp(26px, 7vw, 36px); }
+}
+
+/* 작은 폰 */
+@media (max-width: 360px), (max-height: 600px) {
+  :root {
+    --ptt-size: 68px;
+    --ptt-icon: 24px;
+    --gap: 8px;
+    --pad: 12px;
+  }
+  .subtitle--dst { font-size: 20px; }
+  .subtitle--src { font-size: 14px; }
+}
+
+/* 다크 모드 강제 (기본이 다크) */
+@media (prefers-color-scheme: light) {
+  /* 통역 앱은 의도적으로 다크 유지 — 화면 가독성과 분위기 */
+}
