@@ -191,25 +191,24 @@ body::before {
   gap: 12px;
 }
 
-/* 큰 언어 코드 (ex. "KO", "EN") */
-.lang-code {
+/* 메인: 한국어 언어 이름 — 크게 */
+.lang-name {
   font-family: var(--font-display);
-  font-size: clamp(28px, 8vw, 40px);
+  font-size: clamp(28px, 8vw, 38px);
   font-weight: 800;
-  letter-spacing: -0.04em;
+  letter-spacing: -0.03em;
   line-height: 1;
   color: var(--text);
-  font-feature-settings: "ss01";
 }
 
-/* 한국어 이름 — 작게, 좌측 정렬 */
-.lang-name {
+/* 보조: 영문 코드 — 작게 */
+.lang-code {
+  font-family: var(--font-mono);
   font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 0.12em;
   color: var(--text-dim);
-  margin-top: 4px;
+  margin-top: 6px;
 }
 
 .panel--top .lang-code { color: var(--text); }
@@ -278,10 +277,11 @@ body::before {
 
 .subtitle:empty::before {
   content: attr(data-placeholder);
-  color: var(--text-faint);
-  font-weight: 400;
-  font-size: 14px;
-  letter-spacing: 0.005em;
+  color: var(--text-soft);
+  font-weight: 600;
+  font-size: clamp(16px, 4.2vw, 19px);
+  letter-spacing: -0.005em;
+  opacity: 0.85;
 }
 .subtitle[data-spent="1"]:empty::before {
   opacity: 0.5;
@@ -391,9 +391,7 @@ body::before {
   width: var(--ptt);
   height: var(--ptt);
   border-radius: 50%;
-  border: 1.5px solid var(--border-strong);
-  background: var(--bg-1);
-  color: var(--text-soft);
+  border: 2px solid;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -411,12 +409,11 @@ body::before {
 }
 
 .ptt::before {
-  /* 활성화 시 보이는 펄스 링 */
   content: "";
   position: absolute;
   inset: -8px;
   border-radius: 50%;
-  border: 1px solid currentColor;
+  border: 1.5px solid currentColor;
   opacity: 0;
   z-index: -1;
   transform: scale(0.9);
@@ -424,7 +421,19 @@ body::before {
 
 .ptt:active { transform: scale(0.94); }
 
-/* 나 (파란) */
+/* 평소 상태: 자기 색을 옅게 표시 (어떤 버튼인지 명확) */
+.ptt--me {
+  background: var(--me-soft);
+  border-color: var(--me);
+  color: var(--me);
+}
+.ptt--partner {
+  background: var(--partner-soft);
+  border-color: var(--partner);
+  color: var(--partner);
+}
+
+/* 활성 상태: 진한 색 + 펄스 */
 .ptt--me.is-active {
   background: var(--me);
   border-color: var(--me);
@@ -438,7 +447,6 @@ body::before {
   animation: ring 1.8s var(--ease) infinite;
 }
 
-/* 상대 (보라) */
 .ptt--partner.is-active {
   background: var(--partner);
   border-color: var(--partner);
@@ -476,11 +484,14 @@ body::before {
 }
 
 .ptt__label {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  opacity: 0.85;
+  letter-spacing: -0.005em;
+  opacity: 0.9;
+  max-width: 80%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ============================================

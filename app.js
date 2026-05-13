@@ -23,11 +23,11 @@ const LANG_TO_NAME = {
   hi: '힌디어', id: '인도네시아어', vi: '베트남어',
 };
 
-// 버튼 라벨 (작게)
+// 버튼 라벨 (한국어 짧은 이름)
 const LANG_TO_SHORT = {
-  ko: 'KO', en: 'EN', ja: 'JA', zh: 'ZH', es: 'ES',
-  fr: 'FR', de: 'DE', it: 'IT', pt: 'PT', ru: 'RU',
-  hi: 'HI', id: 'ID', vi: 'VI',
+  ko: '한국어', en: '영어', ja: '일본어', zh: '중국어', es: '스페인어',
+  fr: '프랑스어', de: '독일어', it: '이탈리아어', pt: '포르투갈어', ru: '러시아어',
+  hi: '힌디어', id: '인니어', vi: '베트남어',
 };
 
 const SDP_URL = 'https://api.openai.com/v1/realtime/translations/calls';
