@@ -49,14 +49,15 @@ const els = {
   panelPartner: document.getElementById('panelPartner'),
   meHint: document.getElementById('meHint'),
   partnerHint: document.getElementById('partnerHint'),
+  vizMe: document.getElementById('vizMe'),
+  vizPartner: document.getElementById('vizPartner'),
   audioMeToPartner: document.getElementById('audioMeToPartner'),
   audioPartnerToMe: document.getElementById('audioPartnerToMe'),
 };
 
-function setHint(side, icon, text) {
+function setHint(side, text) {
   const el = side === 'me' ? els.meHint : els.partnerHint;
   if (!el) return;
-  el.querySelector('.hint-icon').textContent = icon;
   el.querySelector('.hint-text').textContent = text;
 }
 
@@ -251,31 +252,37 @@ function getVadContext() {
 function getAudioContext() { return getOutputContext(); }
 
 function routeToLoudspeaker(stream, sinkEl) {
-  // (1) iOS 안전장치: srcObject 연결 + 음소거. 트랙이 죽지 않도록.
+  // (1) iOS 안전장치
   try {
     sinkEl.srcObject = stream;
     sinkEl.muted = true;
     sinkEl.playsInline = true;
     sinkEl.setAttribute('playsinline', '');
-    // play()는 사용자 제스처 후에만 성공. 실패해도 무시 (muted라 영향 없음).
     sinkEl.play?.().catch(() => {});
   } catch {}
 
-  // (2) AudioContext 경로로 실제 재생 (라우드스피커, 미디어 볼륨)
+  // (2) AudioContext 경로로 재생 + analyser tap
   try {
     const ctx = getAudioContext();
     const src = ctx.createMediaStreamSource(stream);
     const gain = ctx.createGain();
-    gain.gain.value = 1.6; // 살짝 부스트 — 모바일에서 통역 음성이 작은 경향
-    src.connect(gain).connect(ctx.destination);
-    // resume은 첫 사용자 제스처 후에만 가능 → bootstrap에서 한 번 해줌
+    gain.gain.value = 1.6;
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.7;
+    // src -> gain -> destination (들리는 경로)
+    // src -> analyser (시각화 분기)
+    src.connect(gain);
+    gain.connect(ctx.destination);
+    src.connect(analyser);
+    return analyser;
   } catch (err) {
     console.warn('AudioContext routing 실패, srcObject 폴백:', err);
-    // 폴백: 일반 재생
     try {
       sinkEl.muted = false;
       sinkEl.play?.().catch(() => {});
     } catch {}
+    return null;
   }
 }
 
@@ -324,19 +331,17 @@ async function openSession({ targetLanguage, outboundTrack, audioOut, onSpeaking
     outputCompletedAt: 0,      // output_transcript.completed 받은 시각
     completed: false,          // 마지막 발화에 대한 결과를 모두 받았는지
     speaking: false,           // 통역 음성 출력 중인지
+    outputAnalyser: null,      // 출력 음성 시각화용 AnalyserNode
   };
   const markActivity = () => {
     state.lastDeltaAt = Date.now();
     state.completed = false;
   };
 
-  // 번역된 오디오 수신.
-  // 모바일에서 WebRTC 오디오를 audio.srcObject로 바로 재생하면 브라우저가
-  // "음성통화 모드"로 라우팅 → 이어피스로 작게 나옴.
-  // 해결: AudioContext를 거쳐 미디어 스트림으로 재생 → 미디어 볼륨/라우드스피커로 출력.
+  // 번역된 오디오 수신 + 시각화용 analyser
   pc.ontrack = ({ streams }) => {
     if (!streams || !streams[0]) return;
-    routeToLoudspeaker(streams[0], audioOut);
+    state.outputAnalyser = routeToLoudspeaker(streams[0], audioOut);
   };
 
   // 송신 트랙 추가. PTT 비활성 상태에서는 replaceTrack(null)로 송신 끊을 예정.
@@ -483,6 +488,159 @@ async function initSessions() {
 }
 
 /* ============================================
+   음파 시각화 (Canvas)
+   ============================================ */
+
+const VIZ_BARS = 32;          // 막대 개수
+const VIZ_MIN_BAR = 0.04;     // 무음일 때 막대 최소 높이 (살짝 살아있는 느낌)
+
+const visualizers = [
+  // me 패널 — 위쪽에서 보면 아래쪽 (panel--bottom)
+  { canvas: null, ctx: null, color: '#5b8cff', side: 'me' },
+  // partner 패널 — 위쪽 panel (panel--top, 180도 회전됨)
+  { canvas: null, ctx: null, color: '#c79dff', side: 'partner' },
+];
+
+function initVisualizers() {
+  visualizers[0].canvas = els.vizMe;
+  visualizers[1].canvas = els.vizPartner;
+  for (const v of visualizers) {
+    // 디바이스 픽셀비 적용
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const rect = v.canvas.getBoundingClientRect();
+    v.canvas.width = Math.floor(rect.width * dpr);
+    v.canvas.height = Math.floor(rect.height * dpr);
+    v.ctx = v.canvas.getContext('2d');
+    v.ctx.scale(dpr, dpr);
+    v.cssW = rect.width;
+    v.cssH = rect.height;
+  }
+  if (!visualizers._raf) {
+    visualizers._raf = requestAnimationFrame(tickViz);
+  }
+}
+
+/**
+ * 어느 analyser를 그릴지 결정.
+ * - 활성 PTT 패널 → 마이크 입력 (audioPipeline.analyser)
+ * - 통역 음성 출력 중인 패널 → 해당 세션의 outputAnalyser
+ * - 둘 다 아님 → null (잔잔한 라인 그림)
+ */
+function pickAnalyserForSide(side) {
+  const panel = side === 'me' ? els.panelMe : els.panelPartner;
+
+  // 통역 음성이 흘러나오는 패널: 출력 analyser 사용
+  if (panel.classList.contains('is-speaking')) {
+    // me 패널에는 partnerToMe 세션의 출력이 흐름 (상대→나 통역)
+    // partner 패널에는 meToPartner 세션의 출력이 흐름 (나→상대 통역)
+    const session = side === 'me' ? sessions.partnerToMe : sessions.meToPartner;
+    return session?.state?.outputAnalyser || null;
+  }
+
+  // 활성 PTT 패널: 마이크 입력 사용
+  if (panel.classList.contains('is-active')) {
+    return audioPipeline.analyser;
+  }
+
+  return null;
+}
+
+const _vizBuf = new Float32Array(512);
+
+function drawViz(v, analyser) {
+  const ctx = v.ctx;
+  const w = v.cssW;
+  const h = v.cssH;
+
+  // 페이드 클리어 (잔상 효과)
+  ctx.clearRect(0, 0, w, h);
+
+  const bars = VIZ_BARS;
+  const gap = 3;
+  const barW = (w - gap * (bars - 1)) / bars;
+  const cy = h / 2;
+
+  // 막대 높이 계산
+  const heights = new Array(bars).fill(VIZ_MIN_BAR);
+  if (analyser) {
+    analyser.getFloatTimeDomainData(_vizBuf);
+    const samplesPerBar = Math.floor(_vizBuf.length / bars);
+    for (let i = 0; i < bars; i++) {
+      let sum = 0;
+      const start = i * samplesPerBar;
+      const end = start + samplesPerBar;
+      for (let j = start; j < end; j++) {
+        const s = _vizBuf[j];
+        sum += s * s;
+      }
+      const rms = Math.sqrt(sum / samplesPerBar);
+      // 부드러운 증폭 (sqrt) + 상한
+      heights[i] = Math.min(1, Math.max(VIZ_MIN_BAR, Math.pow(rms * 4, 0.7)));
+    }
+  } else {
+    // 비활성 상태에서도 살짝 움직임 (정적 라인)
+    const t = performance.now() / 1000;
+    for (let i = 0; i < bars; i++) {
+      heights[i] = VIZ_MIN_BAR + Math.sin(t * 1.2 + i * 0.4) * 0.012;
+    }
+  }
+
+  // 그라데이션
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, v.color);
+  grad.addColorStop(1, v.color + '55');
+  ctx.fillStyle = grad;
+
+  // 막대 그리기 (가운데 정렬)
+  for (let i = 0; i < bars; i++) {
+    const x = i * (barW + gap);
+    const barH = Math.max(2, heights[i] * h * 0.85);
+    const y = cy - barH / 2;
+    const r = Math.min(barW / 2, 3);
+    roundedRect(ctx, x, y, barW, barH, r);
+  }
+}
+
+function roundedRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function tickViz() {
+  for (const v of visualizers) {
+    if (!v.ctx) continue;
+    drawViz(v, pickAnalyserForSide(v.side));
+  }
+  visualizers._raf = requestAnimationFrame(tickViz);
+}
+
+window.addEventListener('resize', () => {
+  // 리사이즈 시 캔버스 재설정
+  for (const v of visualizers) {
+    if (!v.canvas) continue;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const rect = v.canvas.getBoundingClientRect();
+    if (rect.width === 0) continue;
+    v.canvas.width = Math.floor(rect.width * dpr);
+    v.canvas.height = Math.floor(rect.height * dpr);
+    v.ctx = v.canvas.getContext('2d');
+    v.ctx.scale(dpr, dpr);
+    v.cssW = rect.width;
+    v.cssH = rect.height;
+  }
+});
+
+/* ============================================
    힌트 영역 상태 큐 관리
    ============================================
    - 어느 패널이 활성(PTT 눌림)인지
@@ -491,23 +649,22 @@ async function initSessions() {
 */
 
 function defaultHints() {
-  setHint('me', '🎙️', '파란색 버튼을 누르고 말하세요');
-  setHint('partner', '🎙️', '보라색 버튼을 누르고 말하세요');
+  setHint('me', '파란색 버튼을 누르고 말하세요');
+  setHint('partner', '보라색 버튼을 누르고 말하세요');
 }
 
 function onSpeaking(side, isStart) {
   const panel = side === 'me' ? els.panelMe : els.panelPartner;
   if (isStart) {
     panel.classList.add('is-speaking');
-    setHint(side, '🔊', '통역 중…');
+    setHint(side, '통역 중…');
   } else {
     panel.classList.remove('is-speaking');
-    // 활성 상태가 아니면 기본 안내로 복귀
     if (!panel.classList.contains('is-active')) {
       const text = side === 'me'
         ? '파란색 버튼을 누르고 말하세요'
         : '보라색 버튼을 누르고 말하세요';
-      setHint(side, '🎙️', text);
+      setHint(side, text);
     }
   }
 }
@@ -536,11 +693,11 @@ function startTalk(direction) {
   if (direction === 'meToPartner') {
     els.panelMe.classList.add('is-active');
     els.panelPartner.classList.remove('is-active');
-    setHint('me', '🎙️', '말씀하세요');
+    setHint('me', '말씀하세요');
   } else {
     els.panelPartner.classList.add('is-active');
     els.panelMe.classList.remove('is-active');
-    setHint('partner', '🎙️', '말씀하세요');
+    setHint('partner', '말씀하세요');
   }
   setStatus('듣는 중', 'listening');
   haptic(15);
@@ -580,10 +737,10 @@ function stopTalk() {
   // 통역 중 표시(.is-speaking)는 그대로 두고, 출력이 끝날 때 onSpeakingEnd가 정리.
   // 입력 쪽 힌트(말씀하세요)는 즉시 기본으로 복귀
   if (direction === 'meToPartner' && !els.panelMe.classList.contains('is-speaking')) {
-    setHint('me', '🎙️', '파란색 버튼을 누르고 말하세요');
+    setHint('me', '파란색 버튼을 누르고 말하세요');
   }
   if (direction === 'partnerToMe' && !els.panelPartner.classList.contains('is-speaking')) {
-    setHint('partner', '🎙️', '보라색 버튼을 누르고 말하세요');
+    setHint('partner', '보라색 버튼을 누르고 말하세요');
   }
   haptic(8);
 
@@ -663,6 +820,7 @@ async function reinitOnLangChange() {
 function init() {
   updateLangBadges();
   defaultHints();
+  initVisualizers();
   els.myLang.addEventListener('change', () => {
     updateLangBadges();
     reinitOnLangChange();

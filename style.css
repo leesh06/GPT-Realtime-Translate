@@ -254,64 +254,44 @@ body::before {
 }
 
 /* ============================================
-   힌트 영역 (자막 자리 대체 — 상태/안내)
+   패널 본문: 음파 시각화 + 안내 텍스트
    ============================================ */
 
-.panel-hint {
+.panel-body {
   flex: 1;
-  margin-top: 20px;
+  margin-top: 16px;
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 18px;
-  text-align: center;
-  padding: 0 8px;
-  transition: opacity 0.4s var(--ease), transform 0.4s var(--ease);
+  gap: 12px;
+  min-height: 0;
 }
 
-.hint-icon {
-  font-size: clamp(44px, 12vw, 64px);
-  line-height: 1;
-  opacity: 0.55;
-  filter: grayscale(0.2);
-  transition: opacity 0.3s var(--ease), transform 0.6s var(--ease);
+.viz {
+  width: 100%;
+  height: clamp(80px, 18vw, 130px);
+  display: block;
+  opacity: 0.85;
+  transition: opacity 0.4s var(--ease);
 }
 
 .hint-text {
   font-family: var(--font-display);
-  font-size: clamp(17px, 4.5vw, 21px);
+  font-size: clamp(15px, 4vw, 18px);
   font-weight: 600;
   color: var(--text-soft);
-  letter-spacing: -0.01em;
+  letter-spacing: -0.005em;
   line-height: 1.35;
+  text-align: center;
   max-width: 280px;
+  opacity: 0.75;
+  transition: color 0.3s var(--ease), opacity 0.3s var(--ease);
 }
 
-/* 활성 패널의 힌트: 강조 */
-.panel.is-active .hint-icon {
-  opacity: 1;
-  animation: hint-bob 1.6s var(--ease) infinite;
-}
-.panel.is-active .hint-text {
-  color: var(--text);
-}
-
-/* 통역 중(음성 출력 중)인 패널의 힌트 */
-.panel.is-speaking .hint-icon {
-  opacity: 1;
-  animation: hint-wave 1.2s var(--ease) infinite;
-}
-
-@keyframes hint-bob {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-4px); }
-}
-
-@keyframes hint-wave {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.08); }
-}
+.panel.is-active .hint-text { color: var(--text); opacity: 1; }
+.panel.is-speaking .hint-text { color: var(--text); opacity: 1; }
 
 /* ============================================
    컨트롤 바
