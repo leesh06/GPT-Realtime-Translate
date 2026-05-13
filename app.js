@@ -67,82 +67,121 @@ let micStream = null;
 let activeDirection = null; // 'meToPartner' | 'partnerToMe' | null
 
 /* ============================================
-   VAD (Voice Activity Detection) 기반 자동 침묵 게이팅
+   오디오 파이프라인 (마이크 → 게이트 → 송신 트랙)
    ============================================
-   PTT 버튼을 누른 채로 사용자가 말을 멈추면 마이크만 살짝 OFF.
-   다시 말하기 시작하면 즉시 ON.
-   이렇게 하면:
-   - 사용자가 손을 잡고 있어도 통역 음성이 마이크로 다시 들어가지 않음
-   - 동시통역은 살아 있음 (말하는 동안 통역 흐름)
-   - 사용자는 PTT의 명확함을 그대로 누림 — 가만히 있으면 알아서 처리됨
+   원본 마이크 트랙은 항상 활성 유지 (VAD가 RMS를 계속 측정할 수 있게).
+   대신 GainNode로 송신 볼륨을 게이팅한다:
+     - VAD가 침묵 감지 → gain 0 (OpenAI에는 침묵 전송)
+     - VAD가 음성 감지 → gain 1 (정상 전송)
+   PeerConnection에는 합성된 outboundTrack을 추가한다.
 */
-const VAD_SILENCE_MS = 1200;    // 이 시간 이상 조용하면 마이크 OFF
-const VAD_CHECK_INTERVAL = 80;  // 음량 폴링 주기
-const VAD_THRESHOLD = 0.018;    // RMS 임계값 (0~1, 환경에 따라 조정)
-
-let vad = {
-  ctx: null,
-  analyser: null,
-  source: null,
+let audioPipeline = {
+  ctx: null,           // 분석/게이팅용 AudioContext (출력과 분리)
+  source: null,        // 마이크 MediaStreamSource
+  analyser: null,      // RMS 측정용
+  gate: null,          // 송신 게이트 (GainNode)
+  destination: null,   // MediaStreamDestination
+  outboundTrack: null, // 두 세션이 공유할 송신 트랙
   buf: null,
-  timer: null,
-  lastVoiceAt: 0,
-  gatedOff: false,   // VAD가 마이크를 잠시 끈 상태
 };
 
-function startVAD() {
-  if (vad.timer) return; // 이미 작동 중
-  if (!micStream) return;
+function buildAudioPipeline() {
+  if (audioPipeline.outboundTrack) return audioPipeline; // 이미 구축됨
+  if (!micStream) throw new Error('마이크 스트림이 없습니다.');
 
-  try {
-    // 출력 컨텍스트와 분리된 별도 컨텍스트 사용 — 통화모드 라우팅 회피
-    const ctx = getVadContext();
-    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
-    vad.ctx = ctx;
-    vad.source = ctx.createMediaStreamSource(micStream);
-    vad.analyser = ctx.createAnalyser();
-    vad.analyser.fftSize = 512;
-    vad.analyser.smoothingTimeConstant = 0.4;
-    vad.buf = new Float32Array(vad.analyser.fftSize);
-    vad.source.connect(vad.analyser);
-    // 주의: analyser는 destination에 연결하지 않음 (출력 안 됨)
-  } catch (err) {
-    console.warn('VAD 초기화 실패, 게이팅 비활성:', err);
-    return;
-  }
+  const ctx = getVadContext();
+  if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+
+  const source = ctx.createMediaStreamSource(micStream);
+
+  // 1) 분석 분기 — destination 미연결, 출력 영향 없음
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 512;
+  analyser.smoothingTimeConstant = 0.4;
+  source.connect(analyser);
+
+  // 2) 송신 분기 — GainNode로 게이팅 후 MediaStreamDestination으로
+  const gate = ctx.createGain();
+  gate.gain.value = 1; // 평소 1, VAD가 0으로 게이팅
+  const destination = ctx.createMediaStreamDestination();
+  source.connect(gate).connect(destination);
+
+  const outboundTrack = destination.stream.getAudioTracks()[0];
+
+  audioPipeline = {
+    ctx, source, analyser, gate, destination, outboundTrack,
+    buf: new Float32Array(analyser.fftSize),
+  };
+  return audioPipeline;
+}
+
+function destroyAudioPipeline() {
+  try { audioPipeline.source?.disconnect(); } catch {}
+  try { audioPipeline.analyser?.disconnect(); } catch {}
+  try { audioPipeline.gate?.disconnect(); } catch {}
+  try { audioPipeline.destination?.disconnect(); } catch {}
+  audioPipeline = {
+    ctx: null, source: null, analyser: null, gate: null,
+    destination: null, outboundTrack: null, buf: null,
+  };
+}
+
+/* ============================================
+   VAD — GainNode 게이팅 사용
+   ============================================
+   마이크 트랙은 항상 활성, 대신 송신 볼륨만 0/1로 토글한다.
+   따라서 사용자가 다시 말하기 시작하면 RMS가 즉시 올라가서 감지됨.
+*/
+const VAD_SILENCE_MS = 1200;
+const VAD_CHECK_INTERVAL = 80;
+const VAD_THRESHOLD = 0.018;
+const VAD_RAMP_MS = 30;     // gain 변경 시 살짝 ramp (클릭/팝 노이즈 방지)
+
+let vad = {
+  timer: null,
+  lastVoiceAt: 0,
+  gatedOff: false,
+};
+
+function applyGain(value) {
+  if (!audioPipeline.gate || !audioPipeline.ctx) return;
+  const now = audioPipeline.ctx.currentTime;
+  audioPipeline.gate.gain.cancelScheduledValues(now);
+  audioPipeline.gate.gain.setValueAtTime(audioPipeline.gate.gain.value, now);
+  audioPipeline.gate.gain.linearRampToValueAtTime(value, now + VAD_RAMP_MS / 1000);
+}
+
+function startVAD() {
+  if (vad.timer) return;
+  if (!audioPipeline.analyser) return;
 
   vad.lastVoiceAt = Date.now();
   vad.gatedOff = false;
+  applyGain(1);
 
   vad.timer = setInterval(() => {
-    if (!activeDirection || !micStream) return;
-    vad.analyser.getFloatTimeDomainData(vad.buf);
+    if (!activeDirection) return;
+    audioPipeline.analyser.getFloatTimeDomainData(audioPipeline.buf);
 
-    // RMS 계산
     let sum = 0;
-    for (let i = 0; i < vad.buf.length; i++) {
-      const v = vad.buf[i];
-      sum += v * v;
-    }
-    const rms = Math.sqrt(sum / vad.buf.length);
+    const buf = audioPipeline.buf;
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    const rms = Math.sqrt(sum / buf.length);
 
     const now = Date.now();
     const isVoice = rms > VAD_THRESHOLD;
-    const track = micStream.getAudioTracks()[0];
 
     if (isVoice) {
       vad.lastVoiceAt = now;
-      // 게이팅으로 꺼져있던 마이크를 즉시 복귀
-      if (vad.gatedOff && track) {
-        track.enabled = true;
+      if (vad.gatedOff) {
+        applyGain(1);
         vad.gatedOff = false;
         setStatus('듣는 중', 'listening');
       }
     } else {
-      // 침묵 지속 시간이 임계 넘으면 마이크 OFF
       const silentFor = now - vad.lastVoiceAt;
-      if (silentFor >= VAD_SILENCE_MS && !vad.gatedOff && track) {
-        track.enabled = false;
+      if (silentFor >= VAD_SILENCE_MS && !vad.gatedOff) {
+        applyGain(0);
         vad.gatedOff = true;
         setStatus('대기 중', 'ok');
       }
@@ -155,12 +194,8 @@ function stopVAD() {
     clearInterval(vad.timer);
     vad.timer = null;
   }
-  try { vad.source?.disconnect(); } catch {}
-  try { vad.analyser?.disconnect(); } catch {}
-  vad.source = null;
-  vad.analyser = null;
-  vad.buf = null;
   vad.gatedOff = false;
+  applyGain(1); // 안전: 게이트 복귀해서 다음 세션에 영향 없게
 }
 
 function setStatus(text, kind = '') {
@@ -269,14 +304,9 @@ async function fetchClientSecret(targetLanguage) {
 
 /**
  * 단일 통역 세션(한 방향) 생성
- * @param {object} opts
- * @param {string} opts.targetLanguage - 출력 언어 (듣는 사람의 언어)
- * @param {MediaStreamTrack} opts.micTrack - 마이크 트랙 (공유)
- * @param {HTMLAudioElement} opts.audioOut - 번역 음성을 재생할 audio 엘리먼트
- * @param {(srcDelta: string) => void} opts.onSrc - 원문 자막 콜백
- * @param {(dstDelta: string) => void} opts.onDst - 번역문 자막 콜백
+ * outboundTrack은 audioPipeline.outboundTrack (마이크→게이트 후 합성된 트랙)
  */
-async function openSession({ targetLanguage, micTrack, audioOut, onSrc, onDst }) {
+async function openSession({ targetLanguage, outboundTrack, audioOut, onSrc, onDst }) {
   const clientSecret = await fetchClientSecret(targetLanguage);
 
   const pc = new RTCPeerConnection();
@@ -302,9 +332,9 @@ async function openSession({ targetLanguage, micTrack, audioOut, onSrc, onDst })
     routeToLoudspeaker(streams[0], audioOut);
   };
 
-  // 마이크 트랙 추가. 시작은 비활성 상태.
-  micTrack.enabled = false;
-  const sender = pc.addTrack(micTrack);
+  // 송신 트랙 추가. PTT 비활성 상태에서는 replaceTrack(null)로 송신 끊을 예정.
+  // 트랙 자체는 enabled를 토글하지 않는다 (RMS 측정/게이팅이 항상 가능해야 하므로).
+  const sender = pc.addTrack(outboundTrack);
 
   events.addEventListener('message', (e) => {
     let evt;
@@ -354,7 +384,7 @@ async function openSession({ targetLanguage, micTrack, audioOut, onSrc, onDst })
 
   await waitForConnected(pc);
 
-  return { pc, sender, micTrack, dataChannel: events, state };
+  return { pc, sender, outboundTrack, dataChannel: events, state };
 }
 
 function waitForConnected(pc, timeoutMs = 10000) {
@@ -399,26 +429,26 @@ async function initSessions() {
   setStatus('권한 요청');
   await ensureMic();
 
+  // 마이크 → AnalyserNode (RMS) + GainNode → 합성 송신 트랙
+  // 한 번 만들어두고 양쪽 세션이 같은 outboundTrack을 공유한다.
+  const pipeline = buildAudioPipeline();
+
   setStatus('연결 중');
 
   const myLang = els.myLang.value;
   const partnerLang = els.partnerLang.value;
 
-  // 같은 마이크 트랙을 양쪽 세션에 공유
-  const micTrack = micStream.getAudioTracks()[0];
-
-  // 세션 두 개를 병렬로 오픈
   const [meToPartner, partnerToMe] = await Promise.all([
     openSession({
-      targetLanguage: partnerLang, // 상대가 듣는 언어
-      micTrack,
+      targetLanguage: partnerLang,
+      outboundTrack: pipeline.outboundTrack,
       audioOut: els.audioMeToPartner,
       onSrc: (d) => appendSubtitle(els.meSrc, d),
       onDst: (d) => appendSubtitle(els.partnerDst, d),
     }),
     openSession({
-      targetLanguage: myLang, // 내가 듣는 언어
-      micTrack,
+      targetLanguage: myLang,
+      outboundTrack: pipeline.outboundTrack,
       audioOut: els.audioPartnerToMe,
       onSrc: (d) => appendSubtitle(els.partnerSrc, d),
       onDst: (d) => appendSubtitle(els.meDst, d),
@@ -428,8 +458,9 @@ async function initSessions() {
   sessions.meToPartner = meToPartner;
   sessions.partnerToMe = partnerToMe;
 
-  // 시작 시 양쪽 트랙 모두 비활성
-  micTrack.enabled = false;
+  // 시작 직후엔 양쪽 sender에서 트랙 분리 (어느 방향도 송신 안 함)
+  try { meToPartner.sender.replaceTrack(null); } catch {}
+  try { partnerToMe.sender.replaceTrack(null); } catch {}
 
   setStatus('준비', 'ok');
   els.pttMe.disabled = false;
@@ -537,31 +568,18 @@ function scheduleFadeOutForDirection(direction) {
  */
 function startTalk(direction) {
   if (!sessions.meToPartner || !sessions.partnerToMe) return;
-  if (activeDirection) return; // 이미 누군가 말하는 중
+  if (activeDirection) return;
 
   activeDirection = direction;
-  // 안전: 양쪽 둘 다 한 번 끄고
-  sessions.meToPartner.micTrack.enabled = false;
-  // (같은 트랙이므로 사실 한 번만 끄면 됨, 가독성을 위해 명시)
-
-  // 누르는 쪽만 켠다.
-  // 마이크 트랙은 양쪽 세션이 공유하므로 한 번만 enable 하면 충분.
-  // 하지만 "어느 세션이 듣는가"는 RTP 송신이 이뤄지는지 여부 = sender의 트랙 활성화 여부.
-  // RTCPeerConnection은 같은 트랙을 공유해도 sender별로 별도 RTP 스트림을 보낸다.
-  // → 트랙 자체를 enable/disable하면 양쪽 모두 영향. 우리는 그게 의도가 아님.
-  // → 그래서 sender.replaceTrack(null/track) 으로 방향별 게이팅한다.
 
   const active = sessions[direction];
   const inactive = direction === 'meToPartner' ? sessions.partnerToMe : sessions.meToPartner;
 
-  // 활성 방향: 마이크 트랙 연결
-  active.sender.replaceTrack(active.micTrack);
-  // 비활성 방향: 트랙 끊기 (null로)
+  // 방향 게이팅: 활성 sender에만 합성 송신 트랙 연결, 반대편은 끊음
+  active.sender.replaceTrack(active.outboundTrack);
   inactive.sender.replaceTrack(null);
 
-  active.micTrack.enabled = true;
-
-  // VAD 시작 — 사용자가 말을 멈추면 자동으로 마이크 게이팅
+  // VAD 시작 — 게이트(GainNode) 1로 두고 RMS 모니터링 시작
   startVAD();
 
   // 새 발화 시작 → 이전 자막 정리 (양방향 모두)
@@ -601,12 +619,10 @@ function stopTalk() {
   const active = sessions[direction];
   activeDirection = null;
 
-  // VAD 중지 (트랙 게이팅 해제)
+  // VAD 중지 — 게이트 복귀, 모니터링 종료
   stopVAD();
-  // 1) 마이크는 즉시 음소거 (새 음성 차단, 피드백 방지)
-  if (micStream) {
-    micStream.getAudioTracks().forEach((t) => (t.enabled = false));
-  }
+  // 송신 게이트를 즉시 0으로 — 그레이스 기간 동안 새로 흘러가는 입력 차단
+  applyGain(0);
 
   // 2) UI는 곧바로 "통역 마무리 중" 상태로
   els.pttMe.classList.remove('is-active');
