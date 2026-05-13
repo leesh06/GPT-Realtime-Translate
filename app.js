@@ -452,26 +452,104 @@ function waitForConnected(pc, timeoutMs = 10000) {
   });
 }
 
+/**
+ * 폰 내장 마이크를 강제로 선택해서 마이크 스트림을 가져온다.
+ *
+ * 왜 필요한가:
+ * - 사용자가 블루투스 이어폰을 평소 전화/통화용으로 쓰면 "통화 오디오" 설정을
+ *   ON으로 두는 게 자연스러움.
+ * - 그 상태에서 우리 앱이 getUserMedia를 호출하면 OS가 BT 마이크(HFP, 8kHz)로
+ *   자동 라우팅 → 외부 음성을 못 받음.
+ * - 해결: 사용 가능한 입력 장치 중 BT가 아닌 것(=폰 내장)을 콕 찍어서 지정.
+ *
+ * 동작 흐름:
+ *   1) 권한 한 번 받기 위해 기본 getUserMedia
+ *   2) enumerateDevices로 모든 입력 장치 나열 (이제 label 채워짐)
+ *   3) BT/headset 키워드를 포함한 장치 제외 → 폰 내장 후보
+ *   4) 후보가 있으면 그 deviceId로 재차 getUserMedia
+ */
+
+const BT_KEYWORDS_RE = /bluetooth|airpod|buds|headset|hands.?free|hfp|sco|이어폰|헤드셋|블루투스/i;
+
+const BASE_AUDIO_CONSTRAINTS = {
+  echoCancellation: false,
+  noiseSuppression: true,
+  autoGainControl: true,
+  googEchoCancellation: false,
+  googAutoGainControl: true,
+  googNoiseSuppression: true,
+  googHighpassFilter: true,
+};
+
 async function ensureMic() {
   if (micStream) return micStream;
-  // 모바일이 통화모드(이어피스)로 라우팅하는 핵심 트리거가
-  // echoCancellation/통화특화 옵션인 경우가 많다.
-  // VAD가 침묵 시 마이크를 자동 OFF하므로 피드백 1차 차단은 우리가 직접 한다.
-  // → AEC/voice 특화 옵션을 끄고 라우드스피커 유지.
-  micStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: false,
-      noiseSuppression: true,
-      autoGainControl: true,
-      // 일부 브라우저에서 인식하는 추가 힌트들. 알 수 없는 키는 그냥 무시됨.
-      googEchoCancellation: false,
-      googAutoGainControl: true,
-      googNoiseSuppression: true,
-      googHighpassFilter: true,
-    },
+
+  // 1차 시도: 기본 옵션으로 권한 획득
+  let stream = await navigator.mediaDevices.getUserMedia({
+    audio: { ...BASE_AUDIO_CONSTRAINTS },
     video: false,
   });
+
+  // 2차: 폰 내장 마이크를 찾아서 그걸로 다시 잡기
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devices.filter((d) => d.kind === 'audioinput' && d.deviceId);
+    const builtIn = pickBuiltInMic(inputs);
+    const current = stream.getAudioTracks()[0];
+    const currentLabel = current?.label || '';
+
+    console.log('[mic] 현재:', currentLabel);
+    console.log('[mic] 후보:', inputs.map((d) => d.label).join(' | '));
+
+    if (builtIn && builtIn.label && builtIn.label !== currentLabel) {
+      // 다른 장치라면 교체
+      console.log('[mic] 폰 내장으로 교체:', builtIn.label);
+      stream.getTracks().forEach((t) => t.stop()); // 이전 스트림 해제
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: { exact: builtIn.deviceId },
+          ...BASE_AUDIO_CONSTRAINTS,
+        },
+        video: false,
+      });
+    } else {
+      console.log('[mic] 현재 장치 유지');
+    }
+  } catch (err) {
+    console.warn('[mic] 장치 선택 실패, 기본 마이크 사용:', err);
+  }
+
+  micStream = stream;
   return micStream;
+}
+
+/**
+ * 사용 가능한 audioinput 목록에서 폰 내장 마이크로 보이는 항목을 선택.
+ * - 라벨에 BT/이어폰 키워드 없는 것 우선
+ * - 'default' 같은 가상 장치보다 실제 장치 우선
+ */
+function pickBuiltInMic(inputs) {
+  if (!inputs?.length) return null;
+  // 라벨이 비어있으면 권한이 충분치 않은 것 — 첫 번째 사용
+  const labeled = inputs.filter((d) => d.label);
+  if (!labeled.length) return null;
+
+  // BT 키워드가 없는 것
+  const nonBT = labeled.filter((d) => !BT_KEYWORDS_RE.test(d.label));
+  if (nonBT.length === 0) {
+    // 전부 BT뿐이면 첫 번째라도 사용
+    return labeled[0];
+  }
+
+  // 'built-in' / '내장' / 'phone' 같은 키워드 있으면 우선
+  const explicit = nonBT.find((d) =>
+    /built.?in|internal|phone|mobile|내장|기본/i.test(d.label)
+  );
+  if (explicit) return explicit;
+
+  // default 가상 장치가 아닌 것 우선
+  const real = nonBT.find((d) => d.deviceId !== 'default' && d.deviceId !== 'communications');
+  return real || nonBT[0];
 }
 
 async function initSessions() {
