@@ -54,34 +54,98 @@ let micStream = null;
 let activeDirection = null; // 'meToPartner' | 'partnerToMe' | null
 
 /* ============================================
-   에코 피드백 차단 (mic ducking)
+   VAD (Voice Activity Detection) 기반 자동 침묵 게이팅
    ============================================
-   통역 음성이 스피커로 나오는 동안 같은 폰의 마이크에 그 소리가 다시 잡혀서
-   무한 통역 루프가 도는 현상을 막는다.
-   출력 오디오 델타가 들어오면 mic.enabled = false로 잠깐 차단.
-   델타가 멎고 일정 시간 지나면 다시 활성화.
+   PTT 버튼을 누른 채로 사용자가 말을 멈추면 마이크만 살짝 OFF.
+   다시 말하기 시작하면 즉시 ON.
+   이렇게 하면:
+   - 사용자가 손을 잡고 있어도 통역 음성이 마이크로 다시 들어가지 않음
+   - 동시통역은 살아 있음 (말하는 동안 통역 흐름)
+   - 사용자는 PTT의 명확함을 그대로 누림 — 가만히 있으면 알아서 처리됨
 */
-const DUCK_RELEASE_MS = 350; // 마지막 출력 델타 후 이만큼 지나면 마이크 복귀
-let duckReleaseTimer = null;
-let isDucked = false;
+const VAD_SILENCE_MS = 1200;    // 이 시간 이상 조용하면 마이크 OFF
+const VAD_CHECK_INTERVAL = 80;  // 음량 폴링 주기
+const VAD_THRESHOLD = 0.018;    // RMS 임계값 (0~1, 환경에 따라 조정)
 
-function duckMic() {
-  if (!activeDirection || !micStream) return;
-  if (!isDucked) {
-    isDucked = true;
-    micStream.getAudioTracks().forEach((t) => (t.enabled = false));
+let vad = {
+  ctx: null,
+  analyser: null,
+  source: null,
+  buf: null,
+  timer: null,
+  lastVoiceAt: 0,
+  gatedOff: false,   // VAD가 마이크를 잠시 끈 상태
+};
+
+function startVAD() {
+  if (vad.timer) return; // 이미 작동 중
+  if (!micStream) return;
+
+  try {
+    const ctx = getAudioContext();
+    vad.ctx = ctx;
+    vad.source = ctx.createMediaStreamSource(micStream);
+    vad.analyser = ctx.createAnalyser();
+    vad.analyser.fftSize = 512;
+    vad.analyser.smoothingTimeConstant = 0.4;
+    vad.buf = new Float32Array(vad.analyser.fftSize);
+    vad.source.connect(vad.analyser);
+    // 주의: analyser는 destination에 연결하지 않음 (출력 안 됨)
+  } catch (err) {
+    console.warn('VAD 초기화 실패, 게이팅 비활성:', err);
+    return;
   }
-  if (duckReleaseTimer) clearTimeout(duckReleaseTimer);
-  duckReleaseTimer = setTimeout(unduckMic, DUCK_RELEASE_MS);
+
+  vad.lastVoiceAt = Date.now();
+  vad.gatedOff = false;
+
+  vad.timer = setInterval(() => {
+    if (!activeDirection || !micStream) return;
+    vad.analyser.getFloatTimeDomainData(vad.buf);
+
+    // RMS 계산
+    let sum = 0;
+    for (let i = 0; i < vad.buf.length; i++) {
+      const v = vad.buf[i];
+      sum += v * v;
+    }
+    const rms = Math.sqrt(sum / vad.buf.length);
+
+    const now = Date.now();
+    const isVoice = rms > VAD_THRESHOLD;
+    const track = micStream.getAudioTracks()[0];
+
+    if (isVoice) {
+      vad.lastVoiceAt = now;
+      // 게이팅으로 꺼져있던 마이크를 즉시 복귀
+      if (vad.gatedOff && track) {
+        track.enabled = true;
+        vad.gatedOff = false;
+        setStatus(activeDirection === 'meToPartner' ? '듣는 중 · 나' : '듣는 중 · 상대', 'listening');
+      }
+    } else {
+      // 침묵 지속 시간이 임계 넘으면 마이크 OFF
+      const silentFor = now - vad.lastVoiceAt;
+      if (silentFor >= VAD_SILENCE_MS && !vad.gatedOff && track) {
+        track.enabled = false;
+        vad.gatedOff = true;
+        setStatus('대기 중… 말씀하세요', 'ok');
+      }
+    }
+  }, VAD_CHECK_INTERVAL);
 }
 
-function unduckMic() {
-  duckReleaseTimer = null;
-  isDucked = false;
-  // 여전히 PTT가 눌려있을 때만 복귀 (손 뗐다면 stopTalk가 이미 처리)
-  if (activeDirection && micStream) {
-    micStream.getAudioTracks().forEach((t) => (t.enabled = true));
+function stopVAD() {
+  if (vad.timer) {
+    clearInterval(vad.timer);
+    vad.timer = null;
   }
+  try { vad.source?.disconnect(); } catch {}
+  try { vad.analyser?.disconnect(); } catch {}
+  vad.source = null;
+  vad.analyser = null;
+  vad.buf = null;
+  vad.gatedOff = false;
 }
 
 function setStatus(text, kind = '') {
@@ -222,8 +286,8 @@ async function openSession({ targetLanguage, micTrack, audioOut, onSrc, onDst })
     }
     if (evt.type === 'session.output_audio.delta') {
       markActivity();
-      // 같은 폰에서 출력 음성이 마이크로 다시 들어가지 않도록 마이크 일시 차단
-      duckMic();
+      // ducking은 사용하지 않음 — 동시통역을 위해.
+      // 사용자가 말을 멈추면 VAD가 자동으로 마이크를 게이팅해서 피드백을 막는다.
     }
     if (evt.type === 'session.input_transcript.completed') onSrc('\n');
     if (evt.type === 'session.output_transcript.completed') {
@@ -457,9 +521,9 @@ function startTalk(direction) {
   inactive.sender.replaceTrack(null);
 
   active.micTrack.enabled = true;
-  // ducking 상태 초기화
-  isDucked = false;
-  if (duckReleaseTimer) { clearTimeout(duckReleaseTimer); duckReleaseTimer = null; }
+
+  // VAD 시작 — 사용자가 말을 멈추면 자동으로 마이크 게이팅
+  startVAD();
 
   // 새 발화 시작 → 이전 자막 정리 (양방향 모두)
   // 페이드 아웃 진행 중이던 것도 즉시 제거되어 화면이 깨끗해진다.
@@ -490,13 +554,12 @@ function stopTalk() {
   const active = sessions[direction];
   activeDirection = null;
 
+  // VAD 중지 (트랙 게이팅 해제)
+  stopVAD();
   // 1) 마이크는 즉시 음소거 (새 음성 차단, 피드백 방지)
   if (micStream) {
     micStream.getAudioTracks().forEach((t) => (t.enabled = false));
   }
-  // ducking 타이머 정리
-  if (duckReleaseTimer) { clearTimeout(duckReleaseTimer); duckReleaseTimer = null; }
-  isDucked = false;
 
   // 2) UI는 곧바로 "통역 마무리 중" 상태로
   els.pttMe.classList.remove('is-active');
