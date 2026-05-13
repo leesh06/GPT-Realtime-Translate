@@ -825,6 +825,79 @@ async function reinitOnLangChange() {
   }
 }
 
+/* ============================================
+   라이프사이클: 백그라운드 진입 시 마이크/세션 완전 해제
+   ============================================
+   폰 뒤로가기/홈 누름 → visibilitychange(hidden) 또는 pagehide.
+   이때 마이크 트랙을 stop()으로 진짜 풀어줘야 다른 앱이 마이크 사용 가능.
+   복귀 시 사용자 제스처 한 번으로 재초기화.
+*/
+
+let isTornDown = false; // 마이크/세션이 해제된 상태인지
+
+function tearDown(reason = 'background') {
+  console.log('[lifecycle] teardown:', reason);
+  isTornDown = true;
+  // 진행 중인 PTT를 정리
+  try { stopTalk(); } catch {}
+
+  // VAD 중지
+  try { stopVAD(); } catch {}
+
+  // 세션 닫기
+  try { sessions.meToPartner?.pc.close(); } catch {}
+  try { sessions.partnerToMe?.pc.close(); } catch {}
+  sessions.meToPartner = null;
+  sessions.partnerToMe = null;
+
+  // 오디오 파이프라인(GainNode 등) 해제
+  try { destroyAudioPipeline(); } catch {}
+
+  // 마이크 트랙 진짜 해제 (브라우저가 마이크 인디케이터 끔, OS가 풀어줌)
+  if (micStream) {
+    try { micStream.getTracks().forEach((t) => t.stop()); } catch {}
+    micStream = null;
+  }
+
+  // AudioContext 일시정지 (CPU/배터리 절약)
+  try { if (outputCtx && outputCtx.state === 'running') outputCtx.suspend(); } catch {}
+  try { if (vadCtx && vadCtx.state === 'running') vadCtx.suspend(); } catch {}
+
+  // UI 리셋
+  els.pttMe.disabled = true;
+  els.pttPartner.disabled = true;
+  els.pttMe.classList.remove('is-active');
+  els.pttPartner.classList.remove('is-active');
+  els.panelMe.classList.remove('is-active', 'is-speaking');
+  els.panelPartner.classList.remove('is-active', 'is-speaking');
+  defaultHints();
+  setStatus('화면을 탭하세요');
+}
+
+let bootstrapping = false;
+async function bootstrap() {
+  if (bootstrapping) return;
+  if (!isTornDown && (sessions.meToPartner || sessions.partnerToMe)) return; // 이미 살아있음
+  bootstrapping = true;
+  isTornDown = false;
+  try {
+    const ctx = getAudioContext();
+    if (ctx.state === 'suspended') await ctx.resume();
+  } catch {}
+  try {
+    const v = getVadContext();
+    if (v.state === 'suspended') await v.resume();
+  } catch {}
+  try {
+    await initSessions();
+  } catch (err) {
+    console.error(err);
+    setStatus(`오류: ${err.message}`, 'error');
+  } finally {
+    bootstrapping = false;
+  }
+}
+
 function init() {
   updateLangBadges();
   defaultHints();
@@ -843,24 +916,22 @@ function init() {
   bindPTT(els.pttMe, 'meToPartner');
   bindPTT(els.pttPartner, 'partnerToMe');
 
-  // 최초 사용자 제스처(첫 탭/클릭) 후 세션 시작 → iOS Safari 마이크/오디오 정책 회피
-  const bootstrap = async () => {
-    document.removeEventListener('click', bootstrap);
-    document.removeEventListener('touchstart', bootstrap);
-    // 사용자 제스처 안에서 AudioContext 초기화/resume — 라우드스피커 출력 활성화
-    try {
-      const ctx = getAudioContext();
-      if (ctx.state === 'suspended') await ctx.resume();
-    } catch {}
-    try {
-      await initSessions();
-    } catch (err) {
-      console.error(err);
-      setStatus(`오류: ${err.message}`, 'error');
+  // 최초/복귀 사용자 제스처로 세션 시작
+  const onUserGesture = () => bootstrap();
+  document.addEventListener('click', onUserGesture);
+  document.addEventListener('touchstart', onUserGesture);
+
+  // 백그라운드/포그라운드 라이프사이클
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      tearDown('hidden');
     }
-  };
-  document.addEventListener('click', bootstrap, { once: false });
-  document.addEventListener('touchstart', bootstrap, { once: false });
+    // 복귀(visible)는 사용자가 화면 탭하면 onUserGesture가 bootstrap 호출
+  });
+  // pagehide는 PWA가 백그라운드로 갈 때, freeze될 때 등 더 광범위
+  window.addEventListener('pagehide', () => tearDown('pagehide'));
+  // 명시적인 뒤로가기 / 새로고침 / 닫기 시도
+  window.addEventListener('beforeunload', () => tearDown('unload'));
 
   setStatus('화면을 탭하세요');
 
