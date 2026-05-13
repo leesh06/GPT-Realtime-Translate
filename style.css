@@ -63,6 +63,20 @@
   -webkit-tap-highlight-color: transparent;
 }
 
+/* 모바일 롱프레스/텍스트선택/드래그 차단 (PTT 버튼 동작 보호) */
+body, button, .ptt, .ptt *, .lang-pill, .lang-trigger, .panel-head, .hint-text, .status-bar {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* PTT 버튼 내부 자식은 이벤트를 받지 못하게 → 항상 버튼 자체로 이벤트 도달 */
+.ptt > * {
+  pointer-events: none;
+}
+
 html, body {
   margin: 0;
   padding: 0;

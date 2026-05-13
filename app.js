@@ -785,17 +785,25 @@ function finishGrace() {
 function bindPTT(btn, direction) {
   const start = (e) => {
     e.preventDefault();
+    // 손가락이 버튼 밖으로 살짝 밀려도 이 버튼이 이벤트를 계속 받게
+    try { btn.setPointerCapture?.(e.pointerId); } catch {}
     startTalk(direction);
   };
   const end = (e) => {
     e.preventDefault();
+    try { btn.releasePointerCapture?.(e.pointerId); } catch {}
     stopTalk();
   };
+
   btn.addEventListener('pointerdown', start);
   btn.addEventListener('pointerup', end);
-  btn.addEventListener('pointerleave', end);
   btn.addEventListener('pointercancel', end);
+  // 텍스트 선택, 컨텍스트 메뉴, 드래그 시작 모두 차단
   btn.addEventListener('contextmenu', (e) => e.preventDefault());
+  btn.addEventListener('selectstart', (e) => e.preventDefault());
+  btn.addEventListener('dragstart', (e) => e.preventDefault());
+  // touchstart에서도 한 번 더 — 일부 안드 브라우저에서 click 합성 막기
+  btn.addEventListener('touchstart', (e) => e.preventDefault(), { passive: false });
 }
 
 async function reinitOnLangChange() {
