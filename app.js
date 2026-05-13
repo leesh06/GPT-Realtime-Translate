@@ -9,16 +9,25 @@
  * - 마이크 1개 + 트랙 게이팅으로 피드백 루프와 화자 혼동 방지
  */
 
-const LANG_TO_FLAG = {
-  ko: '🇰🇷', en: '🇺🇸', ja: '🇯🇵', zh: '🇨🇳', es: '🇪🇸',
-  fr: '🇫🇷', de: '🇩🇪', it: '🇮🇹', pt: '🇵🇹', ru: '🇷🇺',
-  hi: '🇮🇳', id: '🇮🇩', vi: '🇻🇳',
+// 큰 표시용 언어 코드
+const LANG_TO_CODE = {
+  ko: 'KO', en: 'EN', ja: 'JA', zh: 'ZH', es: 'ES',
+  fr: 'FR', de: 'DE', it: 'IT', pt: 'PT', ru: 'RU',
+  hi: 'HI', id: 'ID', vi: 'VI',
 };
 
+// 한국어 이름
+const LANG_TO_NAME = {
+  ko: '한국어', en: '영어', ja: '일본어', zh: '중국어', es: '스페인어',
+  fr: '프랑스어', de: '독일어', it: '이탈리아어', pt: '포르투갈어', ru: '러시아어',
+  hi: '힌디어', id: '인도네시아어', vi: '베트남어',
+};
+
+// 버튼 라벨 (작게)
 const LANG_TO_SHORT = {
-  ko: '한', en: 'EN', ja: '日', zh: '中', es: 'ES',
+  ko: 'KO', en: 'EN', ja: 'JA', zh: 'ZH', es: 'ES',
   fr: 'FR', de: 'DE', it: 'IT', pt: 'PT', ru: 'RU',
-  hi: 'हि', id: 'ID', vi: 'VI',
+  hi: 'HI', id: 'ID', vi: 'VI',
 };
 
 const SDP_URL = 'https://api.openai.com/v1/realtime/translations/calls';
@@ -32,8 +41,12 @@ const els = {
   pttPartnerLabel: document.getElementById('pttPartnerLabel'),
   myLang: document.getElementById('myLang'),
   partnerLang: document.getElementById('partnerLang'),
-  myFlag: document.getElementById('myFlag'),
-  partnerFlag: document.getElementById('partnerFlag'),
+  myCode: document.getElementById('myCode'),
+  myName: document.getElementById('myName'),
+  partnerCode: document.getElementById('partnerCode'),
+  partnerName: document.getElementById('partnerName'),
+  panelMe: document.getElementById('panelMe'),
+  panelPartner: document.getElementById('panelPartner'),
   meSrc: document.getElementById('meSrc'),
   meDst: document.getElementById('meDst'),
   partnerSrc: document.getElementById('partnerSrc'),
@@ -82,7 +95,9 @@ function startVAD() {
   if (!micStream) return;
 
   try {
-    const ctx = getAudioContext();
+    // 출력 컨텍스트와 분리된 별도 컨텍스트 사용 — 통화모드 라우팅 회피
+    const ctx = getVadContext();
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
     vad.ctx = ctx;
     vad.source = ctx.createMediaStreamSource(micStream);
     vad.analyser = ctx.createAnalyser();
@@ -121,7 +136,7 @@ function startVAD() {
       if (vad.gatedOff && track) {
         track.enabled = true;
         vad.gatedOff = false;
-        setStatus(activeDirection === 'meToPartner' ? '듣는 중 · 나' : '듣는 중 · 상대', 'listening');
+        setStatus('듣는 중', 'listening');
       }
     } else {
       // 침묵 지속 시간이 임계 넘으면 마이크 OFF
@@ -129,7 +144,7 @@ function startVAD() {
       if (silentFor >= VAD_SILENCE_MS && !vad.gatedOff && track) {
         track.enabled = false;
         vad.gatedOff = true;
-        setStatus('대기 중… 말씀하세요', 'ok');
+        setStatus('대기 중', 'ok');
       }
     }
   }, VAD_CHECK_INTERVAL);
@@ -165,19 +180,35 @@ function haptic(ms = 12) {
 /**
  * 모바일에서 WebRTC 오디오를 라우드스피커(미디어 출력)로 강제 라우팅.
  *
- * 1) MediaStream을 audio.srcObject에 한 번 붙임 (iOS는 이게 있어야 트랙이 살아남음)
- *    단 audio.muted = true로 두어 이중 재생 방지.
- * 2) AudioContext로 같은 스트림을 받아서 GainNode 거쳐 destination으로 출력.
- *    이 경로는 일반 미디어 재생 경로라 라우드스피커로 나가고 미디어 볼륨을 따른다.
+ * 핵심: 출력용 AudioContext와 마이크 분석용 AudioContext를 분리한다.
+ * 마이크 input source를 출력 컨텍스트에 붙이면 브라우저가 "음성통화"로
+ * 판단해 출력을 이어피스로 라우팅하는 버그가 있다.
+ *
+ * - outputCtx: 통역 음성 재생용 (destination 연결, 라우드스피커)
+ * - vadCtx:    마이크 RMS 분석 전용 (destination 미연결, 출력에 영향 없음)
  */
-let sharedAudioContext = null;
-function getAudioContext() {
-  if (!sharedAudioContext) {
+let outputCtx = null;
+let vadCtx = null;
+
+function getOutputContext() {
+  if (!outputCtx) {
     const Ctx = window.AudioContext || window.webkitAudioContext;
-    sharedAudioContext = new Ctx({ latencyHint: 'interactive' });
+    outputCtx = new Ctx({ latencyHint: 'interactive' });
   }
-  return sharedAudioContext;
+  return outputCtx;
 }
+
+function getVadContext() {
+  if (!vadCtx) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    // 분석 전용이라 sampleRate를 낮춰도 충분
+    vadCtx = new Ctx({ latencyHint: 'playback' });
+  }
+  return vadCtx;
+}
+
+// 하위 호환: 기존에 getAudioContext() 호출하던 경로는 출력 컨텍스트로 라우팅
+function getAudioContext() { return getOutputContext(); }
 
 function routeToLoudspeaker(stream, sinkEl) {
   // (1) iOS 안전장치: srcObject 연결 + 음소거. 트랙이 죽지 않도록.
@@ -211,8 +242,10 @@ function routeToLoudspeaker(stream, sinkEl) {
 function updateLangBadges() {
   const my = els.myLang.value;
   const partner = els.partnerLang.value;
-  els.myFlag.textContent = LANG_TO_FLAG[my] || '🏳️';
-  els.partnerFlag.textContent = LANG_TO_FLAG[partner] || '🏳️';
+  els.myCode.textContent = LANG_TO_CODE[my] || my.toUpperCase();
+  els.myName.textContent = LANG_TO_NAME[my] || my;
+  els.partnerCode.textContent = LANG_TO_CODE[partner] || partner.toUpperCase();
+  els.partnerName.textContent = LANG_TO_NAME[partner] || partner;
   els.pttMeLabel.textContent = LANG_TO_SHORT[my] || my.toUpperCase();
   els.pttPartnerLabel.textContent = LANG_TO_SHORT[partner] || partner.toUpperCase();
 }
@@ -342,14 +375,20 @@ function waitForConnected(pc, timeoutMs = 10000) {
 
 async function ensureMic() {
   if (micStream) return micStream;
-  // echoCancellation을 켜면 모바일에서 통화모드로 라우팅될 수 있지만,
-  // 우리는 출력을 AudioContext로 분리해서 재생하므로 라우드스피커 유지가 가능하다.
-  // 켜두면 스피커→마이크 피드백 루프를 1차로 막아준다.
+  // 모바일이 통화모드(이어피스)로 라우팅하는 핵심 트리거가
+  // echoCancellation/통화특화 옵션인 경우가 많다.
+  // VAD가 침묵 시 마이크를 자동 OFF하므로 피드백 1차 차단은 우리가 직접 한다.
+  // → AEC/voice 특화 옵션을 끄고 라우드스피커 유지.
   micStream = await navigator.mediaDevices.getUserMedia({
     audio: {
-      echoCancellation: true,
+      echoCancellation: false,
       noiseSuppression: true,
       autoGainControl: true,
+      // 일부 브라우저에서 인식하는 추가 힌트들. 알 수 없는 키는 그냥 무시됨.
+      googEchoCancellation: false,
+      googAutoGainControl: true,
+      googNoiseSuppression: true,
+      googHighpassFilter: true,
     },
     video: false,
   });
@@ -357,10 +396,10 @@ async function ensureMic() {
 }
 
 async function initSessions() {
-  setStatus('마이크 권한 요청…');
+  setStatus('권한 요청');
   await ensureMic();
 
-  setStatus('연결 중…');
+  setStatus('연결 중');
 
   const myLang = els.myLang.value;
   const partnerLang = els.partnerLang.value;
@@ -392,7 +431,7 @@ async function initSessions() {
   // 시작 시 양쪽 트랙 모두 비활성
   micTrack.enabled = false;
 
-  setStatus('준비됨', 'ok');
+  setStatus('준비', 'ok');
   els.pttMe.disabled = false;
   els.pttPartner.disabled = false;
 }
@@ -532,7 +571,15 @@ function startTalk(direction) {
 
   const btn = direction === 'meToPartner' ? els.pttMe : els.pttPartner;
   btn.classList.add('is-active');
-  setStatus(direction === 'meToPartner' ? '듣는 중 · 나' : '듣는 중 · 상대', 'listening');
+  // 활성 방향에 따라 해당 패널도 강조
+  if (direction === 'meToPartner') {
+    els.panelMe.classList.add('is-active');
+    els.panelPartner.classList.remove('is-active');
+  } else {
+    els.panelPartner.classList.add('is-active');
+    els.panelMe.classList.remove('is-active');
+  }
+  setStatus(direction === 'meToPartner' ? '듣는 중' : '듣는 중', 'listening');
   haptic(15);
 }
 
@@ -564,9 +611,11 @@ function stopTalk() {
   // 2) UI는 곧바로 "통역 마무리 중" 상태로
   els.pttMe.classList.remove('is-active');
   els.pttPartner.classList.remove('is-active');
+  els.panelMe.classList.remove('is-active');
+  els.panelPartner.classList.remove('is-active');
   els.pttMe.disabled = true;
   els.pttPartner.disabled = true;
-  setStatus('통역 마무리 중…', 'ok');
+  setStatus('마무리 중', 'ok');
   haptic(8);
 
   if (!active) {
@@ -605,7 +654,7 @@ function stopTalk() {
 function finishGrace() {
   els.pttMe.disabled = false;
   els.pttPartner.disabled = false;
-  setStatus('준비됨', 'ok');
+  setStatus('준비', 'ok');
 }
 
 // PTT 이벤트 바인딩 (마우스 + 터치 + 키보드)
@@ -627,7 +676,7 @@ function bindPTT(btn, direction) {
 
 async function reinitOnLangChange() {
   // 언어가 바뀌면 세션을 다시 만들어야 한다 (출력 언어는 세션 생성 시 고정)
-  setStatus('언어 변경 → 재연결…');
+  setStatus('재연결 중');
   els.pttMe.disabled = true;
   els.pttPartner.disabled = true;
   try {
@@ -679,7 +728,7 @@ function init() {
   document.addEventListener('click', bootstrap, { once: false });
   document.addEventListener('touchstart', bootstrap, { once: false });
 
-  setStatus('화면을 한 번 탭하세요');
+  setStatus('화면을 탭하세요');
 
   // 서비스워커 등록
   if ('serviceWorker' in navigator) {
